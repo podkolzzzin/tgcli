@@ -1,0 +1,16 @@
+bin/
+obj/
+.vs/
+.idea/
+*.user
+*.suo
+
+# Local Telegram session data. This contains auth data and cached files.
+.tgcli/
+tdlib-db/
+tdlib-files/
+config.json
+
+# Release output
+artifacts/
+publish/

@@ -1,0 +1,84 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    name: ${{ matrix.rid }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            rid: linux-x64
+            binary: tgcli
+          - os: macos-latest
+            rid: osx-x64
+            binary: tgcli
+          - os: windows-latest
+            rid: win-x64
+            binary: tgcli.exe
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Restore
+        run: dotnet restore TgCli.csproj
+
+      - name: Audit packages
+        run: dotnet list TgCli.csproj package --vulnerable --include-transitive
+
+      - name: Publish
+        shell: bash
+        run: |
+          dotnet publish TgCli.csproj \
+            -c Release \
+            -r "${{ matrix.rid }}" \
+            --self-contained true \
+            -p:PublishSingleFile=true \
+            -p:IncludeNativeLibrariesForSelfExtract=true \
+            -p:PublishReadyToRun=true \
+            -p:EnableCompressionInSingleFile=true \
+            -p:StripSymbols=true \
+            -p:DebugType=none \
+            -p:DebugSymbols=false \
+            -o "artifacts/${{ matrix.rid }}"
+
+      - name: Package
+        shell: bash
+        run: |
+          if [[ "${{ runner.os }}" == "Windows" ]]; then
+            asset="artifacts/tgcli-${{ matrix.rid }}.exe"
+            mv "artifacts/${{ matrix.rid }}/${{ matrix.binary }}" "$asset"
+          else
+            chmod +x "artifacts/${{ matrix.rid }}/${{ matrix.binary }}"
+            asset="artifacts/tgcli-${{ matrix.rid }}"
+            mv "artifacts/${{ matrix.rid }}/${{ matrix.binary }}" "$asset"
+          fi
+          echo "ASSET_PATH=$asset" >> "$GITHUB_ENV"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: tgcli-${{ matrix.rid }}
+          path: ${{ env.ASSET_PATH }}
+
+      - name: Attach to GitHub release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ env.ASSET_PATH }}
