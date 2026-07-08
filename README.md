@@ -4,7 +4,43 @@ Small command-line tool for reading Telegram chats with TDLib.
 
 ## Install
 
-Download the binary for your OS from GitHub Releases.
+Linux:
+
+```bash
+sudo curl -L https://github.com/podkolzzzin/tgcli/releases/download/v2.0.0/tgcli-linux-x64 -o /usr/local/bin/tgcli && sudo chmod +x /usr/local/bin/tgcli
+```
+
+Windows PowerShell, as Administrator:
+
+```powershell
+New-Item -ItemType Directory -Force "$env:ProgramFiles\tgcli" | Out-Null; Invoke-WebRequest "https://github.com/podkolzzzin/tgcli/releases/download/v2.0.0/tgcli-win-x64.exe" -OutFile "$env:ProgramFiles\tgcli\tgcli.exe"; [Environment]::SetEnvironmentVariable("Path", [Environment]::GetEnvironmentVariable("Path", "Machine") + ";$env:ProgramFiles\tgcli", "Machine")
+```
+
+macOS:
+
+```bash
+sudo curl -L https://github.com/podkolzzzin/tgcli/releases/download/v2.0.0/tgcli-osx-x64 -o /usr/local/bin/tgcli && sudo chmod +x /usr/local/bin/tgcli
+```
+
+Then open a new terminal and run:
+
+```bash
+tgcli --help
+```
+
+## Agent Skill
+
+Install for Codex:
+
+```bash
+mkdir -p ~/.codex/skills/tgcli && curl -fsSL https://raw.githubusercontent.com/podkolzzzin/tgcli/main/.codex/skills/tgcli/SKILL.md -o ~/.codex/skills/tgcli/SKILL.md
+```
+
+Install for Claude:
+
+```bash
+mkdir -p ~/.claude/skills/tgcli && curl -fsSL https://raw.githubusercontent.com/podkolzzzin/tgcli/main/.claude/skills/tgcli/SKILL.md -o ~/.claude/skills/tgcli/SKILL.md
+```
 
 ## Login
 
