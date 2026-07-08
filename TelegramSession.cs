@@ -8,6 +8,7 @@ namespace TgCli;
 internal sealed class TelegramSession : IAsyncDisposable
 {
     private readonly SessionConfig _config;
+    private FileStream? _lockStream;
     private TdApi.AuthorizationState? _authorizationState;
     private TaskCompletionSource<TdApi.AuthorizationState> _authorizationChanged = NewAuthorizationChangedSource();
 
@@ -20,12 +21,13 @@ internal sealed class TelegramSession : IAsyncDisposable
 
     public TdClient Client { get; }
 
-    public static async Task<TelegramSession> CreateAsync(string? sessionDirectory, int apiId, string? apiHash, bool saveConfig)
+    public static async Task<TelegramSession> CreateAsync(string? sessionDirectory, int apiId, string? apiHash, bool saveConfig, int lockTimeout = 30, bool noWait = false)
     {
         var config = SessionConfig.Load(sessionDirectory);
         config.ApplyOverrides(apiId, apiHash);
         config.Validate();
         config.EnsureDirectories();
+        var lockStream = await AcquireLockAsync(config, TimeSpan.FromSeconds(noWait ? 0 : Math.Max(0, lockTimeout)));
 
         if (saveConfig)
         {
@@ -33,14 +35,14 @@ internal sealed class TelegramSession : IAsyncDisposable
         }
 
         DisableTdLibLogging();
-        var session = new TelegramSession(new TdClient(), config);
+        var session = new TelegramSession(new TdClient(), config) { _lockStream = lockStream };
         await session.InitializeAsync();
         return session;
     }
 
-    public static async Task<TelegramSession> CreateReadyAsync(string? sessionDirectory)
+    public static async Task<TelegramSession> CreateReadyAsync(string? sessionDirectory, int lockTimeout = 30, bool noWait = false)
     {
-        var session = await CreateAsync(sessionDirectory, apiId: 0, apiHash: null, saveConfig: false);
+        var session = await CreateAsync(sessionDirectory, apiId: 0, apiHash: null, saveConfig: false, lockTimeout, noWait);
         await session.EnsureReadyAsync();
         return session;
     }
@@ -141,6 +143,7 @@ internal sealed class TelegramSession : IAsyncDisposable
     {
         Client.UpdateReceived -= OnUpdateReceived;
         await Task.Run(Client.Dispose);
+        await (_lockStream?.DisposeAsync() ?? ValueTask.CompletedTask);
     }
 
     private async Task InitializeAsync()
@@ -177,7 +180,41 @@ internal sealed class TelegramSession : IAsyncDisposable
                 systemLanguageCode: "en",
                 deviceModel: Environment.MachineName,
                 systemVersion: RuntimeInformation.OSDescription,
-                applicationVersion: "2.0.0");
+                applicationVersion: "3.0.0");
+        }
+    }
+
+    private static async Task<FileStream> AcquireLockAsync(SessionConfig config, TimeSpan timeout)
+    {
+        var lockPath = Path.Combine(config.RootDirectory, "tdlib.lock");
+        var ownerPath = lockPath + ".owner";
+        var deadline = DateTimeOffset.UtcNow + timeout;
+        Exception? lastError = null;
+
+        while (true)
+        {
+            try
+            {
+                var stream = new FileStream(lockPath, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
+                stream.SetLength(0);
+                await using var writer = new StreamWriter(stream, leaveOpen: true);
+                await writer.WriteAsync(Environment.ProcessId.ToString(System.Globalization.CultureInfo.InvariantCulture));
+                await writer.FlushAsync();
+                stream.Position = 0;
+                File.WriteAllText(ownerPath, Environment.ProcessId.ToString(System.Globalization.CultureInfo.InvariantCulture));
+                return stream;
+            }
+            catch (IOException ex)
+            {
+                lastError = ex;
+                if (DateTimeOffset.UtcNow >= deadline)
+                {
+                    var owner = File.Exists(ownerPath) ? File.ReadAllText(ownerPath).Trim() : "unknown";
+                    throw new IOException($"TDLib database is locked by another tgcli process (owner PID: {owner}). Use --lock-timeout to wait longer or --no-wait to fail immediately.", ex);
+                }
+
+                await Task.Delay(TimeSpan.FromMilliseconds(250));
+            }
         }
     }
 

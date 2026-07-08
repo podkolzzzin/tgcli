@@ -10,6 +10,8 @@ internal enum OutputFormat
 {
     Tsv,
     Jsonl,
+    Json,
+    Plain,
     Md
 }
 
@@ -34,7 +36,9 @@ internal sealed record MessageRow(
     [property: JsonPropertyName("tg_url")] string? TgUrl = null,
     [property: JsonPropertyName("https_url")] string? HttpsUrl = null,
     [property: JsonPropertyName("https_fallback")] string? HttpsFallback = null,
-    string? Query = null);
+    string? Query = null,
+    long? OriginalChatId = null,
+    long? OriginalMessageId = null);
 
 internal static class Output
 {
@@ -48,9 +52,11 @@ internal static class Output
         return format.Trim().ToLowerInvariant() switch
         {
             "tsv" => OutputFormat.Tsv,
-            "jsonl" or "json" => OutputFormat.Jsonl,
+            "jsonl" => OutputFormat.Jsonl,
+            "json" => OutputFormat.Json,
+            "plain" or "text" => OutputFormat.Plain,
             "md" or "markdown" => OutputFormat.Md,
-            _ => throw new ArgumentException("Format must be one of: tsv, jsonl, md.", nameof(format))
+            _ => throw new ArgumentException("Format must be one of: json, jsonl, tsv, plain, md.", nameof(format))
         };
     }
 
@@ -95,18 +101,98 @@ internal static class Output
             rows.Add(await BuildMessageRowAsync(tg, message, query, includeLinks));
         }
 
+        WriteRows(writer, rows, format, title, includeLinks);
+    }
+
+    public static async Task WriteExportedMessagesAsync(
+        TextWriter writer,
+        TelegramSession tg,
+        IEnumerable<ExportedMessage> messages,
+        OutputFormat format,
+        string? title = null,
+        bool includeLinks = false)
+    {
+        var rows = new List<MessageRow>();
+        foreach (var item in messages.OrderBy(x => x.Message.Id))
+        {
+            rows.Add((await BuildMessageRowAsync(tg, item.Message, null, includeLinks)) with
+            {
+                OriginalChatId = item.OriginalChatId,
+                OriginalMessageId = item.OriginalMessageId
+            });
+        }
+
+        WriteRows(writer, rows, format, title, includeLinks);
+    }
+
+    private static void PrintChats(IEnumerable<ChatRow> rows, OutputFormat format, TextWriter writer)
+    {
         switch (format)
         {
             case OutputFormat.Tsv:
+                writer.WriteLine("chat_id\ttitle\ttype\tusername\tunread\tlast_message");
+                foreach (var row in rows)
+                {
+                    writer.WriteLine(string.Join('\t',
+                        row.ChatId.ToString(CultureInfo.InvariantCulture),
+                        Clean(row.Title),
+                        row.Type,
+                        Clean(row.Username),
+                        row.Unread.ToString(CultureInfo.InvariantCulture),
+                        Clean(row.LastMessage)));
+                }
+                break;
+
+            case OutputFormat.Jsonl:
+                foreach (var row in rows)
+                {
+                    writer.WriteLine(JsonSerializer.Serialize(row, JsonOptions));
+                }
+                break;
+
+            case OutputFormat.Md:
+                foreach (var row in rows)
+                {
+                    writer.WriteLine($"## {row.Title}");
+                    writer.WriteLine();
+                    writer.WriteLine($"- Chat ID: `{row.ChatId}`");
+                    writer.WriteLine($"- Type: `{row.Type}`");
+                    if (!string.IsNullOrWhiteSpace(row.Username))
+                    {
+                        writer.WriteLine($"- Username: `@{row.Username}`");
+                    }
+
+                    writer.WriteLine($"- Unread: `{row.Unread}`");
+                    writer.WriteLine($"- Last message: {row.LastMessage}");
+                    writer.WriteLine();
+                }
+                break;
+        }
+    }
+
+    private static void WriteRows(TextWriter writer, List<MessageRow> rows, OutputFormat format, string? title, bool includeLinks)
+    {
+        switch (format)
+        {
+            case OutputFormat.Plain:
+                foreach (var row in rows.OrderByDescending(x => x.MessageId))
+                {
+                    writer.WriteLine(string.IsNullOrWhiteSpace(row.Text) ? row.Kind : row.Text);
+                }
+                break;
+
+            case OutputFormat.Tsv:
                 writer.WriteLine(includeLinks
-                    ? "chat_id\tmessage_id\tdate\tsender\tsender_name\tkind\tfile_id\treply_to_message_id\ttg_url\thttps_url\thttps_fallback\ttext"
-                    : "chat_id\tmessage_id\tdate\tsender\tsender_name\tkind\tfile_id\treply_to_message_id\ttext");
+                    ? "chat_id\tmessage_id\toriginal_chat_id\toriginal_message_id\tdate\tsender\tsender_name\tkind\tfile_id\treply_to_message_id\ttg_url\thttps_url\thttps_fallback\ttext"
+                    : "chat_id\tmessage_id\toriginal_chat_id\toriginal_message_id\tdate\tsender\tsender_name\tkind\tfile_id\treply_to_message_id\ttext");
                 foreach (var row in rows.OrderByDescending(x => x.MessageId))
                 {
                     var values = new List<string>
                     {
                         row.ChatId.ToString(CultureInfo.InvariantCulture),
                         row.MessageId.ToString(CultureInfo.InvariantCulture),
+                        row.OriginalChatId?.ToString(CultureInfo.InvariantCulture) ?? string.Empty,
+                        row.OriginalMessageId?.ToString(CultureInfo.InvariantCulture) ?? string.Empty,
                         Clean(row.Date),
                         Clean(row.Sender),
                         Clean(row.SenderName),
@@ -132,6 +218,10 @@ internal static class Output
                 {
                     writer.WriteLine(JsonSerializer.Serialize(ToJsonRow(row, includeLinks), JsonOptions));
                 }
+                break;
+
+            case OutputFormat.Json:
+                writer.WriteLine(JsonSerializer.Serialize(rows.Select(x => ToJsonRow(x, includeLinks)), JsonOptions));
                 break;
 
             case OutputFormat.Md:
@@ -176,51 +266,6 @@ internal static class Output
                             : $"_file_id: `{row.FileId}`; kind: `{row.Kind}`_");
                     }
 
-                    writer.WriteLine();
-                }
-                break;
-        }
-    }
-
-    private static void PrintChats(IEnumerable<ChatRow> rows, OutputFormat format, TextWriter writer)
-    {
-        switch (format)
-        {
-            case OutputFormat.Tsv:
-                writer.WriteLine("chat_id\ttitle\ttype\tusername\tunread\tlast_message");
-                foreach (var row in rows)
-                {
-                    writer.WriteLine(string.Join('\t',
-                        row.ChatId.ToString(CultureInfo.InvariantCulture),
-                        Clean(row.Title),
-                        row.Type,
-                        Clean(row.Username),
-                        row.Unread.ToString(CultureInfo.InvariantCulture),
-                        Clean(row.LastMessage)));
-                }
-                break;
-
-            case OutputFormat.Jsonl:
-                foreach (var row in rows)
-                {
-                    writer.WriteLine(JsonSerializer.Serialize(row, JsonOptions));
-                }
-                break;
-
-            case OutputFormat.Md:
-                foreach (var row in rows)
-                {
-                    writer.WriteLine($"## {row.Title}");
-                    writer.WriteLine();
-                    writer.WriteLine($"- Chat ID: `{row.ChatId}`");
-                    writer.WriteLine($"- Type: `{row.Type}`");
-                    if (!string.IsNullOrWhiteSpace(row.Username))
-                    {
-                        writer.WriteLine($"- Username: `@{row.Username}`");
-                    }
-
-                    writer.WriteLine($"- Unread: `{row.Unread}`");
-                    writer.WriteLine($"- Last message: {row.LastMessage}");
                     writer.WriteLine();
                 }
                 break;
@@ -369,7 +414,9 @@ internal static class Output
             row.FileId,
             row.Text,
             row.ReplyToMessageId,
-            row.Query
+            row.Query,
+            row.OriginalChatId,
+            row.OriginalMessageId
         };
     }
 

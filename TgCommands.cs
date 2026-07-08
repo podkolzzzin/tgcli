@@ -1,4 +1,5 @@
 using ConsoleAppFramework;
+using System.Globalization;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using TdLib;
@@ -223,7 +224,7 @@ public sealed class MessageCommands
     /// <param name="chatId">Chat id that contains the message.</param>
     /// <param name="messageId">Message id.</param>
     /// <param name="session">Session directory. Defaults to ~/.local/share/tgcli.</param>
-    public async Task Get(long chatId, long messageId, string? session = null)
+    public async Task Get(long chatId, long messageId, string format = "json", string? session = null)
     {
         await using var tg = await TelegramSession.CreateReadyAsync(session);
         var message = await tg.Client.GetMessageAsync(chatId, messageId);
@@ -243,7 +244,22 @@ public sealed class MessageCommands
             ["message"] = JObject.FromObject(message, JsonSerializer.CreateDefault())
         };
 
-        Console.WriteLine(payload.ToString(Formatting.None));
+        switch (format.Trim().ToLowerInvariant())
+        {
+            case "json":
+            case "jsonl":
+                Console.WriteLine(payload.ToString(Formatting.None));
+                break;
+            case "tsv":
+                Console.WriteLine("chat_id\tmessage_id\tdate\tsender\tsender_name\tkind\ttext");
+                Console.WriteLine(string.Join('\t', message.ChatId, message.Id, DateTimeOffset.FromUnixTimeSeconds(message.Date), FormatSender(message.SenderId), senderName, MessageFiles.GetKind(message.Content), Clean(MessageFiles.GetMessageText(message.Content))));
+                break;
+            case "plain":
+                Console.WriteLine(MessageFiles.GetMessageText(message.Content));
+                break;
+            default:
+                throw new ArgumentException("Format must be one of: json, jsonl, tsv, plain.", nameof(format));
+        }
     }
 
     private static JObject LinkCommandsJson(MessageLinkInfo links)
@@ -312,6 +328,11 @@ public sealed class MessageCommands
     {
         return values.FirstOrDefault(x => !string.IsNullOrWhiteSpace(x)) ?? string.Empty;
     }
+
+    private static string Clean(string? value)
+    {
+        return (value ?? string.Empty).Replace('\t', ' ').Replace('\r', ' ').Replace('\n', ' ').Trim();
+    }
 }
 
 public sealed class ChatCommands
@@ -363,15 +384,50 @@ public sealed class ChatCommands
         bool local = false,
         bool all = false,
         int maxPages = 1000,
+        bool serviceOnly = false,
+        string? kind = null,
         string format = "tsv",
+        int lockTimeout = 30,
+        bool noWait = false,
         string? session = null)
     {
-        await using var tg = await TelegramSession.CreateReadyAsync(session);
+        await using var tg = await TelegramSession.CreateReadyAsync(session, lockTimeout, noWait);
+        var history = all ? await ChatHistory.FetchAsync(tg, chatId, all: true, local, maxPages, followMigrations: false) : null;
+        if (history is { Complete: false })
+        {
+            throw new InvalidOperationException("Incomplete result: reached --max-pages before history ended.");
+        }
+
         IEnumerable<TdApi.Message> messages = all
-            ? await FetchHistoryAsync(tg, chatId, fromMessageId, local, maxPages)
+            ? history!.Messages.Select(x => x.Message)
             : (await tg.Client.GetChatHistoryAsync(chatId, fromMessageId, offset, ClampLimit(limit, 100), local)).Messages_;
 
-        await Output.PrintMessagesAsync(tg, messages, format);
+        await Output.PrintMessagesAsync(tg, FilterMessages(messages, serviceOnly, kind), format);
+    }
+
+    /// <summary>
+    /// Inspect the complete basic-group to supergroup migration chain.
+    /// </summary>
+    public async Task Migrations(long chatId, string format = "json", string? session = null)
+    {
+        await using var tg = await TelegramSession.CreateReadyAsync(session);
+        var chain = await ChatHistory.GetMigrationChainAsync(tg, chatId);
+        switch (format.Trim().ToLowerInvariant())
+        {
+            case "json":
+            case "jsonl":
+                Console.WriteLine(JsonConvert.SerializeObject(new { chat_id = chatId, chain }, Formatting.None));
+                break;
+            case "tsv":
+                Console.WriteLine("position\tchat_id");
+                for (var i = 0; i < chain.Count; i++) Console.WriteLine($"{i}\t{chain[i]}");
+                break;
+            case "plain":
+                Console.WriteLine(string.Join(Environment.NewLine, chain));
+                break;
+            default:
+                throw new ArgumentException("Format must be one of: json, jsonl, tsv, plain.", nameof(format));
+        }
     }
 
     /// <summary>
@@ -399,6 +455,8 @@ public sealed class ChatCommands
         bool all = false,
         int maxPages = 1000,
         string format = "tsv",
+        bool serviceOnly = false,
+        string? kind = null,
         string? session = null)
     {
         await using var tg = await TelegramSession.CreateReadyAsync(session);
@@ -418,7 +476,7 @@ public sealed class ChatCommands
                     ClampLimit(limit, 100),
                     AttachmentKinds.ToSearchFilter(type))).Messages;
 
-            await Output.PrintMessagesAsync(tg, messages, format, searchQuery);
+            await Output.PrintMessagesAsync(tg, FilterMessages(messages, serviceOnly, kind), format, searchQuery);
         }
     }
 
@@ -438,28 +496,84 @@ public sealed class ChatCommands
         string output = "-",
         string format = "md",
         bool all = true,
+        bool allHistory = false,
         int maxPages = 1000,
         bool local = false,
         bool includeLinks = false,
+        bool resume = false,
+        bool incremental = false,
+        string? expectSince = null,
+        int expectCountMin = 0,
+        bool failIncomplete = false,
         string? session = null)
     {
         await using var tg = await TelegramSession.CreateReadyAsync(session);
         var chat = await tg.Client.GetChatAsync(chatId);
-        IEnumerable<TdApi.Message> messages = all
-            ? await FetchSearchAsync(tg, chatId, query: "", type: "all", fromMessageId: 0, maxPages)
-            : (await tg.Client.GetChatHistoryAsync(chatId, fromMessageId: 0, offset: 0, limit: 100, onlyLocal: local)).Messages_;
+        all = all || allHistory;
+        var history = await ChatHistory.FetchAsync(tg, chatId, all, local, maxPages, followMigrations: all);
+        var manifest = ChatHistory.BuildManifest(history);
+        ChatHistory.ValidateManifest(manifest,
+            string.IsNullOrWhiteSpace(expectSince) ? null : DateTimeOffset.Parse(expectSince, CultureInfo.InvariantCulture),
+            expectCountMin,
+            failIncomplete);
+        Console.Error.WriteLine(manifest.ToString(Formatting.None));
 
         var parsedFormat = Output.ParseFormat(format);
         if (output == "-")
         {
-            await Output.WriteMessagesAsync(Console.Out, tg, messages, parsedFormat, chat.Title, includeLinks: includeLinks);
+            await Output.WriteExportedMessagesAsync(Console.Out, tg, history.Messages, parsedFormat, chat.Title, includeLinks: includeLinks);
             return;
         }
 
         var fullPath = Path.GetFullPath(output);
         Directory.CreateDirectory(Path.GetDirectoryName(fullPath)!);
-        await using var stream = File.CreateText(fullPath);
-        await Output.WriteMessagesAsync(stream, tg, messages, parsedFormat, chat.Title, includeLinks: includeLinks);
+        if ((resume || incremental) && File.Exists(fullPath))
+        {
+            ValidateJsonlCache(fullPath, parsedFormat);
+        }
+
+        var targetPath = (resume || incremental) ? fullPath : fullPath + ".tmp";
+        await using (var stream = new StreamWriter(new FileStream(targetPath, resume || incremental ? FileMode.Append : FileMode.Create, FileAccess.Write, FileShare.None)))
+        {
+            await Output.WriteExportedMessagesAsync(stream, tg, history.Messages, parsedFormat, resume || incremental ? null : chat.Title, includeLinks: includeLinks);
+        }
+
+        if (!resume && !incremental)
+        {
+            File.Move(targetPath, fullPath, overwrite: true);
+        }
+
+        File.WriteAllText(fullPath + ".manifest.json", manifest.ToString(Formatting.Indented));
+    }
+
+    /// <summary>
+    /// Print chat boundary and aggregate statistics.
+    /// </summary>
+    public async Task Stats(long chatId, int maxPages = 1000, bool local = false, string format = "json", string? session = null)
+    {
+        await using var tg = await TelegramSession.CreateReadyAsync(session);
+        var history = await ChatHistory.FetchAsync(tg, chatId, all: true, local, maxPages, followMigrations: true);
+        var messages = history.Messages.Select(x => x.Message).ToArray();
+        var files = messages.SelectMany(MessageFiles.GetAllFiles).ToArray();
+        var payload = new JObject
+        {
+            ["chat_id"] = chatId,
+            ["count"] = messages.Length,
+            ["count_kind"] = history.Complete ? "exact" : "estimated",
+            ["first_timestamp"] = messages.Length == 0 ? JValue.CreateNull() : DateTimeOffset.FromUnixTimeSeconds(messages.Min(x => x.Date)).ToString("O"),
+            ["last_timestamp"] = messages.Length == 0 ? JValue.CreateNull() : DateTimeOffset.FromUnixTimeSeconds(messages.Max(x => x.Date)).ToString("O"),
+            ["participant_count"] = await TryGetParticipantCountAsync(tg, chatId),
+            ["attachments"] = files.Length,
+            ["migrations"] = new JArray(history.SourceChats)
+        };
+
+        Console.WriteLine(format.Trim().ToLowerInvariant() switch
+        {
+            "json" or "jsonl" => payload.ToString(Formatting.None),
+            "plain" => payload.ToString(Formatting.None),
+            "tsv" => $"chat_id\tcount\tcount_kind\tfirst_timestamp\tlast_timestamp\tparticipant_count\tattachments\n{payload["chat_id"]}\t{payload["count"]}\t{payload["count_kind"]}\t{payload["first_timestamp"]}\t{payload["last_timestamp"]}\t{payload["participant_count"]}\t{payload["attachments"]}",
+            _ => throw new ArgumentException("Format must be one of: json, jsonl, tsv, plain.", nameof(format))
+        });
     }
 
     private static async Task<List<TdApi.Message>> FetchHistoryAsync(
@@ -548,6 +662,59 @@ public sealed class ChatCommands
             .Where(x => x.Length > 0 && !x.StartsWith('#'))
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToArray();
+    }
+
+    private static IEnumerable<TdApi.Message> FilterMessages(IEnumerable<TdApi.Message> messages, bool serviceOnly, string? kind)
+    {
+        return messages.Where(message =>
+        {
+            var messageKind = NormalizeKind(MessageFiles.GetKind(message.Content));
+            return (!serviceOnly || string.IsNullOrWhiteSpace(MessageFiles.GetMessageText(message.Content)) && messageKind != "text")
+                && (string.IsNullOrWhiteSpace(kind) || string.Equals(messageKind, NormalizeKind(kind), StringComparison.OrdinalIgnoreCase));
+        });
+    }
+
+    private static string NormalizeKind(string value)
+    {
+        return value.Replace("_", "-").ToLowerInvariant() switch
+        {
+            "chatupgradefrom" => "chat-upgrade-from",
+            "chatupgradeto" => "chat-upgrade-to",
+            var normalized => normalized
+        };
+    }
+
+    private static void ValidateJsonlCache(string path, OutputFormat format)
+    {
+        if (format is not OutputFormat.Jsonl)
+        {
+            return;
+        }
+
+        foreach (var line in File.ReadLines(path))
+        {
+            if (string.IsNullOrWhiteSpace(line)) continue;
+            _ = JToken.Parse(line);
+        }
+    }
+
+    private static async Task<JToken> TryGetParticipantCountAsync(TelegramSession tg, long chatId)
+    {
+        try
+        {
+            var chat = await tg.Client.GetChatAsync(chatId);
+            var supergroupId = ChatHistory.GetLongProperty(chat.Type, "SupergroupId");
+            if (supergroupId is not null)
+            {
+                var info = await tg.Client.GetSupergroupFullInfoAsync(supergroupId.Value);
+                return ChatHistory.GetLongProperty(info, "MemberCount") ?? 0;
+            }
+        }
+        catch
+        {
+        }
+
+        return JValue.CreateNull();
     }
 
     private static int ClampLimit(int value, int max)
