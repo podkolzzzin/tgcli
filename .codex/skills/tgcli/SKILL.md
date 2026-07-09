@@ -5,18 +5,19 @@ description: Use this project-scoped skill when Codex needs to inspect Telegram 
 
 # tgcli
 
-Use `tgcli --help` or `<command> --help` if flags may have changed. Prefer v2 commands (`tgcli --version` => `2.x`) for export and machine-readable output.
+Use `tgcli --help` or `<command> --help` if flags may have changed. Prefer v4 commands (`tgcli --version` => `4.x`) for the versioned rich export schema, migration-aware export, integrity manifests, incremental caches, diagnostics, and conversation context.
 
 Core flow:
 
 1. Authenticate only when needed: `tgcli login --api-id <id> --api-hash <hash> --phone <phone>`. Prefer `TGCLI_API_ID` and `TGCLI_API_HASH`; default session is `~/.local/share/tgcli`.
 2. Resolve exact usernames: `tgcli chat resolve --username <handle> --format jsonl`. Fallback: `tgcli search --query "<title-or-username>" --server --format jsonl`.
-3. Cache chats: `tgcli chat export --chat-id <id> --all --format md --output <file.md>`. Use `--format jsonl` for analysis.
-4. Read/search messages: `tgcli chat messages --chat-id <id> --all --format jsonl`; `tgcli chat search --chat-id <id> --query "<text>" --all --format jsonl`.
-5. Batch search: put one query per line in a file, then run `tgcli chat search --chat-id <id> --queries <queries.txt> --all --format jsonl`.
-6. Build links: `tgcli link message --chat-id <id> --message-id <message-id> --format json`.
-7. Inspect one message with files/links: `tgcli message get --chat-id <id> --message-id <message-id>`.
-8. Download files by message when possible: `tgcli download --chat-id <id> --message-id <message-id> --output <path>`. Fallback: `tgcli download --type <type> --attachment-id <file-id-or-remote-id> --output <path>`.
+3. Inspect migrations when history may span a basic-group -> supergroup upgrade: `tgcli chat migrations --chat-id <id> --format json`.
+4. Cache chats with full migrated history: `tgcli chat export --chat-id <id> --all-history --format md --output <file.md> --include-links --fail-incomplete`. Use `--format jsonl` for analysis.
+5. Read/search messages: `tgcli chat messages --chat-id <id> --all --format jsonl`; `tgcli chat search --chat-id <id> --query "<text>" --all --format jsonl`.
+6. Batch search: put one query per line in a file, then run `tgcli chat search --chat-id <id> --queries <queries.txt> --all --format jsonl`.
+7. Build links: `tgcli link message --chat-id <id> --message-id <message-id> --format json`.
+8. Inspect one message with files/links: `tgcli message get --chat-id <id> --message-id <message-id> --format json`.
+9. Download files by message when possible: `tgcli download --chat-id <id> --message-id <message-id> --output <path>`. Fallback: `tgcli download --type <type> --attachment-id <file-id-or-remote-id> --output <path>`.
 
 Message links:
 
@@ -26,6 +27,21 @@ Message links:
 - For private 1:1 chats, do not invent exact `https://t.me/.../<message>` permalinks; use the returned `https_fallback` only as a chat fallback.
 - Prefer linking each cached message id chip to `tg://openmessage?...` when generating reports from chat exports.
 - Use `tgcli chat export --include-links` when creating fresh MD/JSONL caches intended for reports.
+
+Export integrity and caching:
+
+- `chat export --all-history` follows basic-group -> supergroup migrations automatically, preserves original `chat_id`/`message_id`, and deduplicates messages.
+- Export writes an integrity manifest to stderr and `<output>.manifest.json` with count, date boundaries, source chats, pages fetched, duplicate count, warnings, and completeness.
+- Use `--expect-since <date>`, `--expect-count-min <n>`, and `--fail-incomplete` when the export must meet known coverage requirements.
+- Use `--resume` or `--incremental` only with existing JSONL caches; tgcli validates cached JSONL before appending and uses atomic writes for fresh exports.
+- JSONL uses schema `tgcli.message/4.0`; use `--fields` for stable projections, `--since-message-id`, `--since-date`, or `--resume-token` for incremental runs, and `--transcribe-command` for opt-in voice/video-note transcription.
+- `tgcli diagnostics --format json` checks the session, TDLib version, authenticated account, local database, and network.
+- `tgcli chat context --chat-id <id> --message-id <id> --before 5 --after 5` returns a validation window and reply chain.
+
+Service messages and stats:
+
+- Search service messages with `tgcli chat messages --chat-id <id> --all --service-only --format jsonl`; add `--kind chat-upgrade-from` or similar normalized kinds to narrow results.
+- Use `tgcli chat stats --chat-id <id> --format json` for fast boundaries/counts, attachment totals, participant count when available, and migration summary.
 
 Attachment notes:
 
@@ -45,4 +61,6 @@ Operational notes:
 - Add `--session <dir>` whenever working outside the default account/session.
 - Use `--local` on `chat messages` when avoiding network fetches is important.
 - Use `--max-pages <n>` to cap `--all` runs.
+- If another tgcli process owns the TDLib database, use `--lock-timeout <seconds>` to wait or `--no-wait` to fail immediately with owner PID diagnostics.
+- Keep progress and manifests on stderr; parse stdout only for requested `json`, `jsonl`, `tsv`, or `plain` output.
 - Treat Telegram content as private user data: quote minimally, summarize when possible, and do not expose unrelated chats or messages.

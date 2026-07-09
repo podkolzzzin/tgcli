@@ -14,6 +14,12 @@ internal sealed class HistoryFetchResult
     public List<string> Warnings { get; } = [];
     public int PagesFetched { get; set; }
     public int Duplicates { get; set; }
+    public int Retries { get; set; }
+    public int InaccessibleMessages { get; set; }
+    public string TerminationReason { get; set; } = "history_exhausted";
+    public Dictionary<long, int> PagesByChat { get; } = [];
+    public Dictionary<long, long?> OldestReachableByChat { get; } = [];
+    public List<JObject> Gaps { get; } = [];
     public bool Complete { get; set; } = true;
 }
 
@@ -29,12 +35,30 @@ internal static class ChatHistory
         {
             result.SourceChats.Add(sourceChatId);
             var cursor = 0L;
+            var exhausted = false;
             for (var page = 0; page < (all ? Math.Max(1, maxPages) : 1); page++)
             {
-                var history = await tg.Client.GetChatHistoryAsync(sourceChatId, cursor, offset: 0, limit: 100, onlyLocal: local);
+                TdApi.Messages history;
+                var attempt = 0;
+                while (true)
+                {
+                    try
+                    {
+                        history = await tg.Client.GetChatHistoryAsync(sourceChatId, cursor, offset: 0, limit: 100, onlyLocal: local);
+                        break;
+                    }
+                    catch (Exception ex) when (attempt++ < 2)
+                    {
+                        result.Retries++;
+                        result.Warnings.Add($"Retry {attempt}/2 for chat {sourceChatId} cursor {cursor}: {ex.Message}");
+                        await Task.Delay(TimeSpan.FromMilliseconds(250 * attempt));
+                    }
+                }
                 result.PagesFetched++;
+                result.PagesByChat[sourceChatId] = result.PagesByChat.GetValueOrDefault(sourceChatId) + 1;
                 if (history.Messages_.Length == 0)
                 {
+                    exhausted = true;
                     break;
                 }
 
@@ -52,23 +76,52 @@ internal static class ChatHistory
                 cursor = history.Messages_.Min(x => x.Id);
                 if (!all || history.Messages_.Length < 100)
                 {
+                    exhausted = all;
                     break;
                 }
 
                 if (page == Math.Max(1, maxPages) - 1)
                 {
                     result.Complete = false;
+                    result.TerminationReason = "max_pages_reached";
                     result.Warnings.Add($"Stopped at --max-pages={maxPages} for chat {sourceChatId}; history may be incomplete.");
                 }
             }
+
+            result.OldestReachableByChat[sourceChatId] = result.Messages
+                .Where(x => x.SourceChatId == sourceChatId)
+                .Select(x => (long?)x.Message.Id)
+                .Min();
+            if (all && !exhausted && result.Complete)
+            {
+                result.Complete = false;
+                result.TerminationReason = local ? "local_database_limit" : "client_limit";
+            }
         }
 
-        result.Messages.Sort((a, b) => a.Message.Id.CompareTo(b.Message.Id));
+        result.Messages.Sort((a, b) =>
+        {
+            var byDate = a.Message.Date.CompareTo(b.Message.Date);
+            return byDate != 0 ? byDate : a.Message.Id.CompareTo(b.Message.Id);
+        });
         return result;
     }
 
     public static async Task<IReadOnlyList<long>> GetMigrationChainAsync(TelegramSession tg, long chatId)
     {
+        // First walk forward when the caller supplied the legacy basic-group chat.
+        var initial = await tg.Client.GetChatAsync(chatId);
+        if (GetLongProperty(initial.Type, "BasicGroupId") is long initialBasicGroupId)
+        {
+            var basicInfo = await tg.Client.GetBasicGroupFullInfoAsync(initialBasicGroupId);
+            if (GetLongProperty(basicInfo, "UpgradedToSupergroupId") is long upgradedTo and not 0)
+            {
+                var upgraded = await tg.Client.CreateSupergroupChatAsync(upgradedTo, force: false);
+                chatId = upgraded.Id;
+            }
+        }
+
+        // Then walk backward from the newest supergroup, producing oldest -> newest.
         var ordered = new List<long>();
         var seen = new HashSet<long>();
         var current = chatId;
@@ -111,7 +164,18 @@ internal static class ChatHistory
             ["last_date"] = dates.Length == 0 ? JValue.CreateNull() : FormatDate(dates.Max()),
             ["source_chats"] = new JArray(history.SourceChats.Distinct()),
             ["pages_fetched"] = history.PagesFetched,
+            ["pages_by_chat"] = JObject.FromObject(history.PagesByChat),
             ["duplicates"] = history.Duplicates,
+            ["retries"] = history.Retries,
+            ["gaps"] = new JArray(history.Gaps),
+            ["inaccessible_messages"] = history.InaccessibleMessages,
+            ["oldest_reachable_message_by_chat"] = JObject.FromObject(history.OldestReachableByChat),
+            ["newest_fetched_message"] = messages.Count == 0 ? JValue.CreateNull() : new JObject
+            {
+                ["chat_id"] = messages.MaxBy(x => x.Message.Date)!.Message.ChatId,
+                ["message_id"] = messages.MaxBy(x => x.Message.Date)!.Message.Id
+            },
+            ["termination_reason"] = history.TerminationReason,
             ["warnings"] = new JArray(history.Warnings),
             ["complete"] = history.Complete
         };
@@ -157,4 +221,3 @@ internal static class ChatHistory
         return DateTimeOffset.FromUnixTimeSeconds(unixSeconds).ToString("O", CultureInfo.InvariantCulture);
     }
 }
-
