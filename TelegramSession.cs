@@ -20,6 +20,9 @@ internal sealed class TelegramSession : IAsyncDisposable
     }
 
     public TdClient Client { get; }
+    public string SessionDirectory => _config.RootDirectory;
+    public string DatabaseDirectory => _config.DatabaseDirectory;
+    public string FilesDirectory => _config.FilesDirectory;
 
     public static async Task<TelegramSession> CreateAsync(string? sessionDirectory, int apiId, string? apiHash, bool saveConfig, int lockTimeout = 30, bool noWait = false)
     {
@@ -180,7 +183,7 @@ internal sealed class TelegramSession : IAsyncDisposable
                 systemLanguageCode: "en",
                 deviceModel: Environment.MachineName,
                 systemVersion: RuntimeInformation.OSDescription,
-                applicationVersion: "3.0.0");
+                applicationVersion: "4.0.0");
         }
     }
 

@@ -12,6 +12,7 @@ internal sealed record MessageFile(
     string? MimeType,
     int? Width,
     int? Height,
+    int? Duration,
     long? Size,
     string PropertyPath,
     TdApi.File File);
@@ -25,19 +26,19 @@ internal static class MessageFiles
         return content switch
         {
             TdApi.MessageContent.MessageVoiceNote voice when Matches(requestedKind, AttachmentKind.Voice, AttachmentKind.File) =>
-                FromFile("voice", voice.VoiceNote?.Voice, null, null, null, null, null, "content.voice_note.voice"),
+                FromFile("voice", voice.VoiceNote?.Voice, null, null, null, null, voice.VoiceNote?.Duration, null, "content.voice_note.voice"),
             TdApi.MessageContent.MessageAudio audio when Matches(requestedKind, AttachmentKind.Audio, AttachmentKind.File) =>
-                FromFile("audio", audio.Audio?.Audio_, audio.Audio?.FileName, audio.Audio?.MimeType, null, null, null, "content.audio.audio"),
+                FromFile("audio", audio.Audio?.Audio_, audio.Audio?.FileName, audio.Audio?.MimeType, null, null, audio.Audio?.Duration, null, "content.audio.audio"),
             TdApi.MessageContent.MessageDocument document when Matches(requestedKind, AttachmentKind.Document, AttachmentKind.File) =>
-                FromFile("document", document.Document?.Document_, document.Document?.FileName, document.Document?.MimeType, null, null, null, "content.document.document"),
+                FromFile("document", document.Document?.Document_, document.Document?.FileName, document.Document?.MimeType, null, null, null, null, "content.document.document"),
             TdApi.MessageContent.MessagePhoto photo when Matches(requestedKind, AttachmentKind.Photo, AttachmentKind.File) =>
                 FromPhoto(photo),
             TdApi.MessageContent.MessageVideo video when Matches(requestedKind, AttachmentKind.Video, AttachmentKind.File) =>
-                FromFile("video", video.Video?.Video_, video.Video?.FileName, video.Video?.MimeType, video.Video?.Width, video.Video?.Height, null, "content.video.video"),
+                FromFile("video", video.Video?.Video_, video.Video?.FileName, video.Video?.MimeType, video.Video?.Width, video.Video?.Height, video.Video?.Duration, null, "content.video.video"),
             TdApi.MessageContent.MessageVideoNote videoNote when Matches(requestedKind, AttachmentKind.VideoNote, AttachmentKind.File) =>
-                FromFile("video-note", videoNote.VideoNote?.Video, null, "video/mp4", videoNote.VideoNote?.Length, videoNote.VideoNote?.Length, null, "content.video_note.video"),
+                FromFile("video-note", videoNote.VideoNote?.Video, null, "video/mp4", videoNote.VideoNote?.Length, videoNote.VideoNote?.Length, videoNote.VideoNote?.Duration, null, "content.video_note.video"),
             TdApi.MessageContent.MessageAnimation animation when Matches(requestedKind, AttachmentKind.Animation, AttachmentKind.File) =>
-                FromFile("animation", animation.Animation?.Animation_, animation.Animation?.FileName, animation.Animation?.MimeType, animation.Animation?.Width, animation.Animation?.Height, null, "content.animation.animation"),
+                FromFile("animation", animation.Animation?.Animation_, animation.Animation?.FileName, animation.Animation?.MimeType, animation.Animation?.Width, animation.Animation?.Height, animation.Animation?.Duration, null, "content.animation.animation"),
             _ => null
         };
     }
@@ -84,7 +85,7 @@ internal static class MessageFiles
             .OrderByDescending(x => (long)x.Width * x.Height)
             .FirstOrDefault();
 
-        return FromFile("photo", size?.Photo, null, "image/jpeg", size?.Width, size?.Height, null, "content.photo.sizes[].photo");
+        return FromFile("photo", size?.Photo, null, "image/jpeg", size?.Width, size?.Height, null, null, "content.photo.sizes[].photo");
     }
 
     private static MessageFile? FromFile(
@@ -94,6 +95,7 @@ internal static class MessageFiles
         string? mimeType,
         int? width,
         int? height,
+        int? duration,
         long? size,
         string propertyPath)
     {
@@ -111,6 +113,7 @@ internal static class MessageFiles
             mimeType,
             width,
             height,
+            duration,
             size ?? file.Size,
             propertyPath,
             file);
@@ -146,6 +149,7 @@ internal static class MessageFiles
                     TryGetStringProperty(file, "MimeType"),
                     TryGetIntProperty(file, "Width"),
                     TryGetIntProperty(file, "Height"),
+                    TryGetIntProperty(file, "Duration"),
                     file.Size,
                     path,
                     file));

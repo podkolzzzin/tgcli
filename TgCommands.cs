@@ -9,6 +9,42 @@ namespace TgCli;
 public sealed class TgCommands
 {
     /// <summary>
+    /// Print machine-readable session, TDLib, account, database, and network diagnostics.
+    /// </summary>
+    public async Task Diagnostics(string format = "json", int lockTimeout = 5, bool noWait = false, string? session = null)
+    {
+        var started = DateTimeOffset.UtcNow;
+        await using var tg = await TelegramSession.CreateReadyAsync(session, lockTimeout, noWait);
+        var me = await tg.Client.GetMeAsync();
+        var version = await tg.Client.GetOptionAsync("version");
+        var payload = new JObject
+        {
+            ["healthy"] = true,
+            ["checked_at"] = DateTimeOffset.UtcNow.ToString("O"),
+            ["latency_ms"] = (DateTimeOffset.UtcNow - started).TotalMilliseconds,
+            ["tdlib_version"] = version?.GetType().GetProperty("Value")?.GetValue(version)?.ToString(),
+            ["authenticated_account"] = new JObject
+            {
+                ["user_id"] = me.Id,
+                ["display_name"] = $"{me.FirstName} {me.LastName}".Trim(),
+                ["username"] = me.Usernames?.ActiveUsernames?.FirstOrDefault()
+            },
+            ["session_directory"] = tg.SessionDirectory,
+            ["database_directory"] = tg.DatabaseDirectory,
+            ["database_exists"] = Directory.Exists(tg.DatabaseDirectory),
+            ["database_size_bytes"] = Directory.Exists(tg.DatabaseDirectory)
+                ? Directory.EnumerateFiles(tg.DatabaseDirectory, "*", SearchOption.AllDirectories).Sum(path => new FileInfo(path).Length)
+                : 0,
+            ["network_available"] = true
+        };
+        Console.WriteLine(format.Trim().ToLowerInvariant() switch
+        {
+            "json" or "jsonl" or "plain" => payload.ToString(Formatting.None),
+            _ => throw new ArgumentException("Format must be one of: json, jsonl, plain.", nameof(format))
+        });
+    }
+
+    /// <summary>
     /// Sign in to Telegram and persist the local TDLib session.
     /// </summary>
     /// <param name="apiId">Telegram API id. Can also be set with TGCLI_API_ID.</param>
@@ -502,6 +538,11 @@ public sealed class ChatCommands
         bool includeLinks = false,
         bool resume = false,
         bool incremental = false,
+        long sinceMessageId = 0,
+        string? sinceDate = null,
+        string? resumeToken = null,
+        string? fields = null,
+        string? transcribeCommand = null,
         string? expectSince = null,
         int expectCountMin = 0,
         bool failIncomplete = false,
@@ -511,7 +552,24 @@ public sealed class ChatCommands
         var chat = await tg.Client.GetChatAsync(chatId);
         all = all || allHistory;
         var history = await ChatHistory.FetchAsync(tg, chatId, all, local, maxPages, followMigrations: all);
+        var sinceTimestamp = string.IsNullOrWhiteSpace(sinceDate)
+            ? (DateTimeOffset?)null
+            : DateTimeOffset.Parse(sinceDate, CultureInfo.InvariantCulture);
+        if (!string.IsNullOrWhiteSpace(resumeToken))
+        {
+            var tokenParts = resumeToken.Split(':', 2);
+            if (tokenParts.Length != 2 || !long.TryParse(tokenParts[1], out sinceMessageId))
+            {
+                throw new ArgumentException("Resume token must have the form <chat-id>:<message-id>.", nameof(resumeToken));
+            }
+        }
+        history.Messages.RemoveAll(item =>
+            (sinceMessageId != 0 && item.Message.Id <= sinceMessageId)
+            || (sinceTimestamp is not null && DateTimeOffset.FromUnixTimeSeconds(item.Message.Date) < sinceTimestamp));
+        var fetchedKeys = history.Messages.Select(x => (ChatId: x.Message.ChatId, MessageId: x.Message.Id)).ToHashSet();
         var manifest = ChatHistory.BuildManifest(history);
+        manifest["schema"] = ExportSchema.Name;
+        manifest["schema_version"] = ExportSchema.Version;
         ChatHistory.ValidateManifest(manifest,
             string.IsNullOrWhiteSpace(expectSince) ? null : DateTimeOffset.Parse(expectSince, CultureInfo.InvariantCulture),
             expectCountMin,
@@ -521,29 +579,103 @@ public sealed class ChatCommands
         var parsedFormat = Output.ParseFormat(format);
         if (output == "-")
         {
-            await Output.WriteExportedMessagesAsync(Console.Out, tg, history.Messages, parsedFormat, chat.Title, includeLinks: includeLinks);
+            await Output.WriteExportedMessagesAsync(Console.Out, tg, history.Messages, parsedFormat, chat.Title, includeLinks, fields, transcribeCommand);
             return;
         }
 
         var fullPath = Path.GetFullPath(output);
         Directory.CreateDirectory(Path.GetDirectoryName(fullPath)!);
+        var cachedKeys = new HashSet<(long ChatId, long MessageId)>();
         if ((resume || incremental) && File.Exists(fullPath))
         {
             ValidateJsonlCache(fullPath, parsedFormat);
+            if (parsedFormat is not OutputFormat.Jsonl)
+            {
+                throw new ArgumentException("--resume and --incremental require --format jsonl.");
+            }
+            foreach (var line in File.ReadLines(fullPath).Where(x => !string.IsNullOrWhiteSpace(x)))
+            {
+                var row = JObject.Parse(line);
+                cachedKeys.Add((row.Value<long>("chat_id"), row.Value<long>("message_id")));
+            }
         }
 
-        var targetPath = (resume || incremental) ? fullPath : fullPath + ".tmp";
-        await using (var stream = new StreamWriter(new FileStream(targetPath, resume || incremental ? FileMode.Append : FileMode.Create, FileAccess.Write, FileShare.None)))
+        history.Messages.RemoveAll(x => cachedKeys.Contains((x.Message.ChatId, x.Message.Id)));
+        var deletedKeys = incremental && history.Complete && sinceMessageId == 0 && sinceTimestamp is null
+            ? cachedKeys.Except(fetchedKeys).ToArray()
+            : [];
+        var targetPath = fullPath + ".tmp";
+        await using (var stream = new StreamWriter(new FileStream(targetPath, FileMode.Create, FileAccess.Write, FileShare.None)))
         {
-            await Output.WriteExportedMessagesAsync(stream, tg, history.Messages, parsedFormat, resume || incremental ? null : chat.Title, includeLinks: includeLinks);
+            if ((resume || incremental) && File.Exists(fullPath))
+            {
+                foreach (var line in File.ReadLines(fullPath)) await stream.WriteLineAsync(line);
+            }
+            await Output.WriteExportedMessagesAsync(stream, tg, history.Messages, parsedFormat, resume || incremental ? null : chat.Title, includeLinks, fields, transcribeCommand);
+            foreach (var key in deletedKeys)
+            {
+                await stream.WriteLineAsync(ExportSchema.Tombstone(key.ChatId, key.MessageId).ToString(Formatting.None));
+            }
         }
 
-        if (!resume && !incremental)
+        File.Move(targetPath, fullPath, overwrite: true);
+
+        manifest["existing_message_count"] = cachedKeys.Count;
+        manifest["new_message_count"] = history.Messages.Count;
+        manifest["tombstone_count"] = deletedKeys.Length;
+        manifest["output_record_count"] = cachedKeys.Count + history.Messages.Count + deletedKeys.Length;
+        var last = history.Messages.LastOrDefault();
+        manifest["resume_token"] = last is null
+            ? resumeToken is null ? JValue.CreateNull() : resumeToken
+            : $"{last.Message.ChatId}:{last.Message.Id}";
+        var manifestPath = fullPath + ".manifest.json";
+        var manifestTemp = manifestPath + ".tmp";
+        File.WriteAllText(manifestTemp, manifest.ToString(Formatting.Indented));
+        File.Move(manifestTemp, manifestPath, overwrite: true);
+    }
+
+    /// <summary>
+    /// Return messages around a target and optionally follow its reply chain.
+    /// </summary>
+    public async Task Context(
+        long chatId,
+        long messageId,
+        int before = 5,
+        int after = 5,
+        bool followReplyChain = true,
+        string format = "jsonl",
+        string? session = null)
+    {
+        await using var tg = await TelegramSession.CreateReadyAsync(session);
+        var window = await tg.Client.GetChatHistoryAsync(
+            chatId,
+            messageId,
+            offset: -Math.Max(0, after),
+            limit: Math.Clamp(before + after + 1, 1, 100),
+            onlyLocal: false);
+        var messages = window.Messages_.ToList();
+        var seen = messages.Select(x => (x.ChatId, x.Id)).ToHashSet();
+        if (followReplyChain)
         {
-            File.Move(targetPath, fullPath, overwrite: true);
+            var current = await tg.Client.GetMessageAsync(chatId, messageId);
+            for (var depth = 0; depth < 100 && current.ReplyTo is TdApi.MessageReplyTo.MessageReplyToMessage reply; depth++)
+            {
+                var replyChatId = ChatHistory.GetLongProperty(reply, "ChatId");
+                if (replyChatId is null or 0) replyChatId = current.ChatId;
+                try
+                {
+                    current = await tg.Client.GetMessageAsync(replyChatId.Value, reply.MessageId);
+                    if (seen.Add((current.ChatId, current.Id))) messages.Add(current);
+                }
+                catch
+                {
+                    break;
+                }
+            }
         }
 
-        File.WriteAllText(fullPath + ".manifest.json", manifest.ToString(Formatting.Indented));
+        var exported = messages.Select(x => new ExportedMessage(x, x.ChatId, x.ChatId, x.Id));
+        await Output.WriteExportedMessagesAsync(Console.Out, tg, exported, Output.ParseFormat(format), includeLinks: true);
     }
 
     /// <summary>

@@ -2,6 +2,7 @@ using System.Globalization;
 using System.Text.Encodings.Web;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using Newtonsoft.Json.Linq;
 using TdLib;
 
 namespace TgCli;
@@ -110,8 +111,31 @@ internal static class Output
         IEnumerable<ExportedMessage> messages,
         OutputFormat format,
         string? title = null,
-        bool includeLinks = false)
+        bool includeLinks = false,
+        string? fields = null,
+        string? transcribeCommand = null)
     {
+        if (format is OutputFormat.Jsonl or OutputFormat.Json)
+        {
+            var objects = new List<JObject>();
+            foreach (var item in messages.OrderBy(x => x.Message.Date).ThenBy(x => x.Message.Id))
+            {
+                objects.Add(SelectFields(
+                    await ExportSchema.BuildMessageAsync(tg, item, includeLinks, transcribeCommand),
+                    fields));
+            }
+
+            if (format is OutputFormat.Jsonl)
+            {
+                foreach (var value in objects) writer.WriteLine(value.ToString(Newtonsoft.Json.Formatting.None));
+            }
+            else
+            {
+                writer.WriteLine(new JArray(objects).ToString(Newtonsoft.Json.Formatting.None));
+            }
+            return;
+        }
+
         var rows = new List<MessageRow>();
         foreach (var item in messages.OrderBy(x => x.Message.Id))
         {
@@ -123,6 +147,24 @@ internal static class Output
         }
 
         WriteRows(writer, rows, format, title, includeLinks);
+    }
+
+    private static JObject SelectFields(JObject value, string? fields)
+    {
+        if (string.IsNullOrWhiteSpace(fields))
+        {
+            return value;
+        }
+
+        var names = fields.Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries)
+            .ToHashSet(StringComparer.Ordinal);
+        names.UnionWith(["schema", "schema_version"]);
+        var unknown = names.Where(name => value.Property(name) is null).ToArray();
+        if (unknown.Length > 0)
+        {
+            throw new ArgumentException($"Unknown export field(s): {string.Join(", ", unknown)}.");
+        }
+        return new JObject(value.Properties().Where(property => names.Contains(property.Name)));
     }
 
     private static void PrintChats(IEnumerable<ChatRow> rows, OutputFormat format, TextWriter writer)
