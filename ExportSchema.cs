@@ -29,6 +29,8 @@ internal static class ExportSchema
             files.Add(ToAttachmentJson(file, MessageFiles.GetMessageText(message.Content), generatedText));
         }
 
+        await AttachmentIndex.RecordAsync(tg.SessionDirectory, message.ChatId, message.Id, MessageFiles.GetAllFiles(message));
+
         return new JObject
         {
             ["schema"] = Name,

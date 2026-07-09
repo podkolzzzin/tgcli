@@ -2,6 +2,7 @@ using Newtonsoft.Json.Linq;
 using System;
 using System.IO;
 using System.Text.Json;
+using System.Threading.Tasks;
 using TdLib;
 using Xunit;
 
@@ -79,6 +80,7 @@ public sealed class ExportTests
     {
         var chatJson = JsonSerializer.Serialize(new ChatRow(1, "title", "private", "user", 0, "last"));
         var messageJson = JsonSerializer.Serialize(new MessageRow(1, 2, "date", "sender", "name", "text", 3, "body", 4));
+        var exportedMessageJson = JsonSerializer.Serialize(Output.ToJsonRow(new MessageRow(1, 2, "date", "sender", "name", "text", 3, "body", 4), includeLinks: false));
 
         Assert.Contains("\"chat_id\":1", chatJson);
         Assert.Contains("\"last_message\":\"last\"", chatJson);
@@ -87,6 +89,10 @@ public sealed class ExportTests
         Assert.Contains("\"message_id\":2", messageJson);
         Assert.Contains("\"reply_to_message_id\":4", messageJson);
         Assert.DoesNotContain("MessageId", messageJson);
+
+        Assert.Contains("\"chat_id\":1", exportedMessageJson);
+        Assert.Contains("\"message_id\":2", exportedMessageJson);
+        Assert.DoesNotContain("ChatId", exportedMessageJson);
     }
 
     [Fact]
@@ -102,5 +108,21 @@ public sealed class ExportTests
         var destination = TgCommands.ResolveDownloadDestination(basePath, file);
 
         Assert.Equal(Path.Combine(basePath, "5318883015880545858_120.jpg"), destination);
+    }
+
+    [Fact]
+    public async Task AttachmentIndexCanRoundTripFileMetadata()
+    {
+        var session = Path.Combine(Path.GetTempPath(), "tgcli-cache-" + Guid.NewGuid().ToString("N"));
+        var file = new MessageFile("photo", 1254, "remote-1", "unique-1", null, null, null, null, null, 24156, "content.photo.sizes[].photo", new TdApi.File { Id = 1254 });
+
+        await AttachmentIndex.RecordAsync(session, 1, 2, [file]);
+        var resolved = await AttachmentIndex.ResolveAsync(session, 1254);
+
+        Assert.NotNull(resolved);
+        Assert.Equal(1, resolved!.chat_id);
+        Assert.Equal(2, resolved.message_id);
+        Assert.Equal(1254, resolved.file_id);
+        Assert.Equal("remote-1", resolved.remote_id);
     }
 }

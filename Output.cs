@@ -353,6 +353,10 @@ internal static class Output
     {
         var attachment = MessageFiles.GetPrimaryAttachment(message.Content);
         var links = includeLinks ? await MessageLinks.BuildAsync(tg, message.ChatId, message.Id) : null;
+        if (attachment is not null)
+        {
+            await AttachmentIndex.RecordAsync(tg.SessionDirectory, message.ChatId, message.Id, [attachment]);
+        }
         return new MessageRow(
             message.ChatId,
             message.Id,
@@ -456,28 +460,42 @@ internal static class Output
         return value.Replace("\\", "\\\\").Replace("`", "\\`");
     }
 
-    private static object ToJsonRow(MessageRow row, bool includeLinks)
+    internal static object ToJsonRow(MessageRow row, bool includeLinks)
     {
-        if (includeLinks)
+        return includeLinks
+            ? new
+            {
+                chat_id = row.ChatId,
+                message_id = row.MessageId,
+                date = row.Date,
+                sender = row.Sender,
+                sender_name = row.SenderName,
+                kind = row.Kind,
+                file_id = row.FileId,
+                text = row.Text,
+                reply_to_message_id = row.ReplyToMessageId,
+                tg_url = row.TgUrl,
+                https_url = row.HttpsUrl,
+                https_fallback = row.HttpsFallback,
+                query = row.Query,
+                original_chat_id = row.OriginalChatId,
+                original_message_id = row.OriginalMessageId
+            }
+            : new
         {
-            return row;
-        }
-
-        return new
-        {
-            row.ChatId,
-            row.MessageId,
-            row.Date,
-            row.Sender,
-            row.SenderName,
-            row.Kind,
-            row.FileId,
-            row.Text,
-            row.ReplyToMessageId,
-            row.Query,
-            row.OriginalChatId,
-            row.OriginalMessageId
-        };
+                chat_id = row.ChatId,
+                message_id = row.MessageId,
+                date = row.Date,
+                sender = row.Sender,
+                sender_name = row.SenderName,
+                kind = row.Kind,
+                file_id = row.FileId,
+                text = row.Text,
+                reply_to_message_id = row.ReplyToMessageId,
+                query = row.Query,
+                original_chat_id = row.OriginalChatId,
+                original_message_id = row.OriginalMessageId
+            };
     }
 
     private static string FormatOptionalMdLink(string label, string? url)

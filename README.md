@@ -7,19 +7,19 @@ Small command-line tool for reading Telegram chats with TDLib.
 Linux:
 
 ```bash
-sudo curl -L https://github.com/podkolzzzin/tgcli/releases/download/v4.0.1/tgcli-linux-x64 -o /usr/local/bin/tgcli && sudo chmod +x /usr/local/bin/tgcli
+sudo curl -L https://github.com/podkolzzzin/tgcli/releases/download/v4.0.2/tgcli-linux-x64 -o /usr/local/bin/tgcli && sudo chmod +x /usr/local/bin/tgcli
 ```
 
 Windows PowerShell, as Administrator:
 
 ```powershell
-New-Item -ItemType Directory -Force "$env:ProgramFiles\tgcli" | Out-Null; Invoke-WebRequest "https://github.com/podkolzzzin/tgcli/releases/download/v4.0.1/tgcli-win-x64.exe" -OutFile "$env:ProgramFiles\tgcli\tgcli.exe"; [Environment]::SetEnvironmentVariable("Path", [Environment]::GetEnvironmentVariable("Path", "Machine") + ";$env:ProgramFiles\tgcli", "Machine")
+New-Item -ItemType Directory -Force "$env:ProgramFiles\tgcli" | Out-Null; Invoke-WebRequest "https://github.com/podkolzzzin/tgcli/releases/download/v4.0.2/tgcli-win-x64.exe" -OutFile "$env:ProgramFiles\tgcli\tgcli.exe"; [Environment]::SetEnvironmentVariable("Path", [Environment]::GetEnvironmentVariable("Path", "Machine") + ";$env:ProgramFiles\tgcli", "Machine")
 ```
 
 macOS:
 
 ```bash
-sudo curl -L https://github.com/podkolzzzin/tgcli/releases/download/v4.0.1/tgcli-osx-x64 -o /usr/local/bin/tgcli && sudo chmod +x /usr/local/bin/tgcli
+sudo curl -L https://github.com/podkolzzzin/tgcli/releases/download/v4.0.2/tgcli-osx-x64 -o /usr/local/bin/tgcli && sudo chmod +x /usr/local/bin/tgcli
 ```
 
 Then open a new terminal and run:

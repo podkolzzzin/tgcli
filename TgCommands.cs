@@ -131,9 +131,35 @@ public sealed class TgCommands
         }
 
         var kind = AttachmentKinds.Parse(type ?? "file");
-        return int.TryParse(attachmentId, out var fileId)
-            ? await tg.Client.GetFileAsync(fileId)
-            : await tg.Client.GetRemoteFileAsync(attachmentId, AttachmentKinds.ToFileType(kind));
+        if (int.TryParse(attachmentId, out var fileId))
+        {
+            var cached = await AttachmentIndex.ResolveAsync(tg.SessionDirectory, fileId);
+            if (cached is not null)
+            {
+                if (!string.IsNullOrWhiteSpace(cached.remote_id))
+                {
+                    return await tg.Client.GetRemoteFileAsync(cached.remote_id, AttachmentKinds.ToFileType(kind));
+                }
+
+                var cachedMessage = await tg.Client.GetMessageAsync(cached.chat_id, cached.message_id);
+                var cachedAttachment = MessageFiles.GetPrimaryAttachment(cachedMessage.Content, type)
+                    ?? throw new InvalidOperationException($"Cached attachment {cached.chat_id}/{cached.message_id} no longer contains file id {fileId}.");
+
+                return cachedAttachment.File;
+            }
+
+            try
+            {
+                return await DownloadFileAsync(tg, new TdApi.File { Id = fileId });
+            }
+            catch (TdException)
+            {
+                var fallback = await FindFileByIdAsync(tg, fileId, kind);
+                return fallback ?? throw new InvalidOperationException($"File id {fileId} was not found in the current session. Use --chat-id/--message-id or a remote file id.");
+            }
+        }
+
+        return await tg.Client.GetRemoteFileAsync(attachmentId, AttachmentKinds.ToFileType(kind));
     }
 
     private static async Task<TdApi.File> DownloadFileWithRefreshAsync(
@@ -167,6 +193,64 @@ public sealed class TgCommands
         }
 
         return await tg.Client.DownloadFileAsync(file.Id, priority: 32, offset: 0, limit: 0, synchronous: true);
+    }
+
+    private static async Task<TdApi.File?> FindFileByIdAsync(TelegramSession tg, int fileId, AttachmentKind kind)
+    {
+        var chats = await tg.Client.GetChatsAsync(new TdApi.ChatList.ChatListMain(), 200);
+        var requestedType = kind switch
+        {
+            AttachmentKind.Voice => "voice",
+            AttachmentKind.Document => "document",
+            AttachmentKind.Audio => "audio",
+            AttachmentKind.Video => "video",
+            AttachmentKind.Photo => "photo",
+            AttachmentKind.Animation => "animation",
+            AttachmentKind.VideoNote => "video-note",
+            _ => null
+        };
+
+        foreach (var chatId in chats.ChatIds)
+        {
+            var cursor = 0L;
+            for (var page = 0; page < 10; page++)
+            {
+                var history = await tg.Client.GetChatHistoryAsync(chatId, cursor, 0, 200, onlyLocal: false);
+                if (history.Messages_.Length == 0)
+                {
+                    break;
+                }
+
+                foreach (var message in history.Messages_)
+                {
+                    if (kind == AttachmentKind.File)
+                    {
+                        var file = MessageFiles.GetAllFiles(message).FirstOrDefault(x => x.FileId == fileId);
+                        if (file is not null)
+                        {
+                            return file.File;
+                        }
+
+                        continue;
+                    }
+
+                    var attachment = MessageFiles.GetPrimaryAttachment(message.Content, requestedType);
+                    if (attachment?.FileId == fileId)
+                    {
+                        return attachment.File;
+                    }
+                }
+
+                if (history.Messages_.Length < 200)
+                {
+                    break;
+                }
+
+                cursor = history.Messages_.Min(x => x.Id);
+            }
+        }
+
+        return null;
     }
 
     private static int ClampLimit(int value, int max)
@@ -280,6 +364,8 @@ public sealed class MessageCommands
             ["files"] = new JArray(MessageFiles.GetAllFiles(message).Select(ToFileJson)),
             ["message"] = JObject.FromObject(message, JsonSerializer.CreateDefault())
         };
+
+        await AttachmentIndex.RecordAsync(tg.SessionDirectory, message.ChatId, message.Id, MessageFiles.GetAllFiles(message));
 
         switch (format.Trim().ToLowerInvariant())
         {
@@ -587,6 +673,7 @@ public sealed class ChatCommands
         var fullPath = Path.GetFullPath(output);
         Directory.CreateDirectory(Path.GetDirectoryName(fullPath)!);
         var cachedKeys = new HashSet<(long ChatId, long MessageId)>();
+        string? cachedResumeToken = null;
         if ((resume || incremental) && File.Exists(fullPath))
         {
             ValidateJsonlCache(fullPath, parsedFormat);
@@ -597,7 +684,12 @@ public sealed class ChatCommands
             foreach (var line in File.ReadLines(fullPath).Where(x => !string.IsNullOrWhiteSpace(x)))
             {
                 var row = JObject.Parse(line);
-                cachedKeys.Add((row.Value<long>("chat_id"), row.Value<long>("message_id")));
+                var key = (row.Value<long>("chat_id"), row.Value<long>("message_id"));
+                cachedKeys.Add(key);
+                if (row.Value<bool?>("is_deleted") != true)
+                {
+                    cachedResumeToken = $"{key.Item1}:{key.Item2}";
+                }
             }
         }
 
@@ -627,7 +719,9 @@ public sealed class ChatCommands
         manifest["output_record_count"] = cachedKeys.Count + history.Messages.Count + deletedKeys.Length;
         var last = history.Messages.LastOrDefault();
         manifest["resume_token"] = last is null
-            ? resumeToken is null ? JValue.CreateNull() : resumeToken
+            ? cachedResumeToken is null
+                ? (resumeToken is null ? JValue.CreateNull() : resumeToken)
+                : cachedResumeToken
             : $"{last.Message.ChatId}:{last.Message.Id}";
         var manifestPath = fullPath + ".manifest.json";
         var manifestTemp = manifestPath + ".tmp";
@@ -696,7 +790,11 @@ public sealed class ChatCommands
             ["first_timestamp"] = messages.Length == 0 ? JValue.CreateNull() : DateTimeOffset.FromUnixTimeSeconds(messages.Min(x => x.Date)).ToString("O"),
             ["last_timestamp"] = messages.Length == 0 ? JValue.CreateNull() : DateTimeOffset.FromUnixTimeSeconds(messages.Max(x => x.Date)).ToString("O"),
             ["participant_count"] = await TryGetParticipantCountAsync(tg, chatId),
-            ["attachments"] = files.Length,
+            ["attachments"] = new JObject
+            {
+                ["count"] = files.Length,
+                ["by_kind"] = JObject.FromObject(files.GroupBy(x => x.Kind).ToDictionary(group => group.Key, group => group.Count()))
+            },
             ["migrations"] = new JArray(history.SourceChats)
         };
 
@@ -704,7 +802,7 @@ public sealed class ChatCommands
         {
             "json" or "jsonl" => payload.ToString(Formatting.None),
             "plain" => payload.ToString(Formatting.None),
-            "tsv" => $"chat_id\tcount\tcount_kind\tfirst_timestamp\tlast_timestamp\tparticipant_count\tattachments\n{payload["chat_id"]}\t{payload["count"]}\t{payload["count_kind"]}\t{payload["first_timestamp"]}\t{payload["last_timestamp"]}\t{payload["participant_count"]}\t{payload["attachments"]}",
+            "tsv" => $"chat_id\tcount\tcount_kind\tfirst_timestamp\tlast_timestamp\tparticipant_count\tattachments\n{payload["chat_id"]}\t{payload["count"]}\t{payload["count_kind"]}\t{payload["first_timestamp"]}\t{payload["last_timestamp"]}\t{payload["participant_count"]}\t{payload["attachments"]?["count"]}",
             _ => throw new ArgumentException("Format must be one of: json, jsonl, tsv, plain.", nameof(format))
         });
     }
