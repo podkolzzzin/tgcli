@@ -82,7 +82,7 @@ public sealed class TgCommands
     /// <param name="attachmentId">TDLib integer file id printed by search/messages, or a remote file id string.</param>
     /// <param name="chatId">Chat id that contains the attachment.</param>
     /// <param name="messageId">Message id that contains the attachment.</param>
-    /// <param name="output">Destination file or directory. Defaults to the current directory.</param>
+    /// <param name="output">Destination file or directory. Existing directories, paths ending with a separator, and missing extensionless paths are treated as directories. Defaults to the current directory.</param>
     /// <param name="session">Session directory. Defaults to ~/.local/share/tgcli.</param>
     public async Task Download(
         string? type = null,
@@ -179,12 +179,13 @@ public sealed class TgCommands
         return Math.Min(value, max);
     }
 
-    private static string ResolveDownloadDestination(string output, TdLib.TdApi.File file)
+    internal static string ResolveDownloadDestination(string output, TdLib.TdApi.File file)
     {
         var fullOutput = Path.GetFullPath(output);
         var looksLikeDirectory = output.EndsWith(Path.DirectorySeparatorChar)
             || output.EndsWith(Path.AltDirectorySeparatorChar)
-            || Directory.Exists(fullOutput);
+            || Directory.Exists(fullOutput)
+            || (!File.Exists(fullOutput) && string.IsNullOrWhiteSpace(Path.GetExtension(fullOutput)));
 
         if (!looksLikeDirectory)
         {

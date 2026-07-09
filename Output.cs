@@ -17,28 +17,46 @@ internal enum OutputFormat
 }
 
 internal sealed record ChatRow(
+    [property: JsonPropertyName("chat_id")]
     long ChatId,
+    [property: JsonPropertyName("title")]
     string Title,
+    [property: JsonPropertyName("type")]
     string Type,
+    [property: JsonPropertyName("username")]
     string Username,
+    [property: JsonPropertyName("unread")]
     int Unread,
+    [property: JsonPropertyName("last_message")]
     string LastMessage);
 
 internal sealed record MessageRow(
+    [property: JsonPropertyName("chat_id")]
     long ChatId,
+    [property: JsonPropertyName("message_id")]
     long MessageId,
+    [property: JsonPropertyName("date")]
     string Date,
+    [property: JsonPropertyName("sender")]
     string Sender,
+    [property: JsonPropertyName("sender_name")]
     string SenderName,
+    [property: JsonPropertyName("kind")]
     string Kind,
+    [property: JsonPropertyName("file_id")]
     int? FileId,
+    [property: JsonPropertyName("text")]
     string Text,
+    [property: JsonPropertyName("reply_to_message_id")]
     long? ReplyToMessageId,
     [property: JsonPropertyName("tg_url")] string? TgUrl = null,
     [property: JsonPropertyName("https_url")] string? HttpsUrl = null,
     [property: JsonPropertyName("https_fallback")] string? HttpsFallback = null,
+    [property: JsonPropertyName("query")]
     string? Query = null,
+    [property: JsonPropertyName("original_chat_id")]
     long? OriginalChatId = null,
+    [property: JsonPropertyName("original_message_id")]
     long? OriginalMessageId = null);
 
 internal static class Output

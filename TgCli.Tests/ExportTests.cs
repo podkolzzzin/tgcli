@@ -1,4 +1,7 @@
 using Newtonsoft.Json.Linq;
+using System;
+using System.IO;
+using System.Text.Json;
 using TdLib;
 using Xunit;
 
@@ -69,5 +72,35 @@ public sealed class ExportTests
         Assert.Equal("voice", attachment.Kind);
         Assert.Equal(12, attachment.Duration);
         Assert.Equal(99, attachment.Size);
+    }
+
+    [Fact]
+    public void LightweightJsonRowsUseSnakeCaseNames()
+    {
+        var chatJson = JsonSerializer.Serialize(new ChatRow(1, "title", "private", "user", 0, "last"));
+        var messageJson = JsonSerializer.Serialize(new MessageRow(1, 2, "date", "sender", "name", "text", 3, "body", 4));
+
+        Assert.Contains("\"chat_id\":1", chatJson);
+        Assert.Contains("\"last_message\":\"last\"", chatJson);
+        Assert.DoesNotContain("ChatId", chatJson);
+
+        Assert.Contains("\"message_id\":2", messageJson);
+        Assert.Contains("\"reply_to_message_id\":4", messageJson);
+        Assert.DoesNotContain("MessageId", messageJson);
+    }
+
+    [Fact]
+    public void DownloadDestinationTreatsMissingExtensionlessPathAsDirectory()
+    {
+        var basePath = Path.Combine(Path.GetTempPath(), "tgcli-test-" + Guid.NewGuid().ToString("N"), "assets");
+        var file = new TdApi.File
+        {
+            Id = 1254,
+            Local = new TdApi.LocalFile { Path = "/tmp/5318883015880545858_120.jpg" }
+        };
+
+        var destination = TgCommands.ResolveDownloadDestination(basePath, file);
+
+        Assert.Equal(Path.Combine(basePath, "5318883015880545858_120.jpg"), destination);
     }
 }

@@ -7,19 +7,19 @@ Small command-line tool for reading Telegram chats with TDLib.
 Linux:
 
 ```bash
-sudo curl -L https://github.com/podkolzzzin/tgcli/releases/download/v4.0.0/tgcli-linux-x64 -o /usr/local/bin/tgcli && sudo chmod +x /usr/local/bin/tgcli
+sudo curl -L https://github.com/podkolzzzin/tgcli/releases/download/v4.0.1/tgcli-linux-x64 -o /usr/local/bin/tgcli && sudo chmod +x /usr/local/bin/tgcli
 ```
 
 Windows PowerShell, as Administrator:
 
 ```powershell
-New-Item -ItemType Directory -Force "$env:ProgramFiles\tgcli" | Out-Null; Invoke-WebRequest "https://github.com/podkolzzzin/tgcli/releases/download/v4.0.0/tgcli-win-x64.exe" -OutFile "$env:ProgramFiles\tgcli\tgcli.exe"; [Environment]::SetEnvironmentVariable("Path", [Environment]::GetEnvironmentVariable("Path", "Machine") + ";$env:ProgramFiles\tgcli", "Machine")
+New-Item -ItemType Directory -Force "$env:ProgramFiles\tgcli" | Out-Null; Invoke-WebRequest "https://github.com/podkolzzzin/tgcli/releases/download/v4.0.1/tgcli-win-x64.exe" -OutFile "$env:ProgramFiles\tgcli\tgcli.exe"; [Environment]::SetEnvironmentVariable("Path", [Environment]::GetEnvironmentVariable("Path", "Machine") + ";$env:ProgramFiles\tgcli", "Machine")
 ```
 
 macOS:
 
 ```bash
-sudo curl -L https://github.com/podkolzzzin/tgcli/releases/download/v4.0.0/tgcli-osx-x64 -o /usr/local/bin/tgcli && sudo chmod +x /usr/local/bin/tgcli
+sudo curl -L https://github.com/podkolzzzin/tgcli/releases/download/v4.0.1/tgcli-osx-x64 -o /usr/local/bin/tgcli && sudo chmod +x /usr/local/bin/tgcli
 ```
 
 Then open a new terminal and run:
@@ -65,6 +65,8 @@ tgcli diagnostics --format json
 tgcli download --chat-id 123456789 --message-id 987654321 --output ./files
 ```
 
+`download --output` accepts either a file or directory. Existing directories, paths ending with a path separator, and missing paths without an extension are treated as directories.
+
 ## Export schema and completeness
 
 JSONL exports use the versioned `tgcli.message/4.0` schema. Each record includes stable sender ids and separate display-name/username fields; source chat and message ids; resolved reply chat/message ids and a target preview; edit time; forwarding origin; reactions; polls; structured entities and service events; and complete attachment metadata. Telegram history does not return deleted message bodies. A complete `--incremental` refresh emits explicit tombstones for records that disappeared from the current history.
@@ -85,5 +87,7 @@ Use `--fields chat_id,message_id,text` for a stable projection. Use `--since-mes
 ## Notes
 
 Keep your session directory private. It contains Telegram login data.
+
+Session-backed commands use a lock file in the session directory, normally `~/.local/share/tgcli/tdlib.lock`. If another process owns the TDLib database, use `--lock-timeout <seconds>` to wait or `--no-wait` to fail immediately.
 
 This project is unofficial and is not affiliated with Telegram.
