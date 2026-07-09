@@ -30,6 +30,20 @@ sudo curl -L https://github.com/podkolzzzin/tgcli/releases/download/v4.0.2/tgcli
 - Treat missing extensionless `download --output` paths as directories to avoid accidental files named like directory targets.
 - Document download output and session-lock behavior.
 
+Install:
+
+```bash
+sudo curl -L https://github.com/podkolzzzin/tgcli/releases/download/v4.0.1/tgcli-linux-x64 -o /usr/local/bin/tgcli && sudo chmod +x /usr/local/bin/tgcli
+```
+
+```powershell
+New-Item -ItemType Directory -Force "$env:ProgramFiles\tgcli" | Out-Null; Invoke-WebRequest "https://github.com/podkolzzzin/tgcli/releases/download/v4.0.1/tgcli-win-x64.exe" -OutFile "$env:ProgramFiles\tgcli\tgcli.exe"; [Environment]::SetEnvironmentVariable("Path", [Environment]::GetEnvironmentVariable("Path", "Machine") + ";$env:ProgramFiles\tgcli", "Machine")
+```
+
+```bash
+sudo curl -L https://github.com/podkolzzzin/tgcli/releases/download/v4.0.1/tgcli-osx-x64 -o /usr/local/bin/tgcli && sudo chmod +x /usr/local/bin/tgcli
+```
+
 ## 4.0.0
 
 - Introduce the versioned `tgcli.message/4.0` JSONL schema with stable sender identity, rich Telegram metadata, structured entities, complete attachment metadata, and resolved reply targets.
