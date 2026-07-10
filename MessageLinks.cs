@@ -14,7 +14,7 @@ internal static class MessageLinks
 {
     public static long GetShortMessageId(long messageId)
     {
-        return messageId >> 20;
+        return ChatHistory.GetShortMessageId(messageId);
     }
 
     public static string GetTgUrl(long chatId, long messageId)

@@ -7,19 +7,19 @@ Small command-line tool for reading Telegram chats with TDLib.
 Linux:
 
 ```bash
-sudo curl -L https://github.com/podkolzzzin/tgcli/releases/download/v4.0.2/tgcli-linux-x64 -o /usr/local/bin/tgcli && sudo chmod +x /usr/local/bin/tgcli
+sudo curl -L https://github.com/podkolzzzin/tgcli/releases/download/v5.0.0/tgcli-linux-x64 -o /usr/local/bin/tgcli && sudo chmod +x /usr/local/bin/tgcli
 ```
 
 Windows PowerShell, as Administrator:
 
 ```powershell
-New-Item -ItemType Directory -Force "$env:ProgramFiles\tgcli" | Out-Null; Invoke-WebRequest "https://github.com/podkolzzzin/tgcli/releases/download/v4.0.2/tgcli-win-x64.exe" -OutFile "$env:ProgramFiles\tgcli\tgcli.exe"; [Environment]::SetEnvironmentVariable("Path", [Environment]::GetEnvironmentVariable("Path", "Machine") + ";$env:ProgramFiles\tgcli", "Machine")
+New-Item -ItemType Directory -Force "$env:ProgramFiles\tgcli" | Out-Null; Invoke-WebRequest "https://github.com/podkolzzzin/tgcli/releases/download/v5.0.0/tgcli-win-x64.exe" -OutFile "$env:ProgramFiles\tgcli\tgcli.exe"; [Environment]::SetEnvironmentVariable("Path", [Environment]::GetEnvironmentVariable("Path", "Machine") + ";$env:ProgramFiles\tgcli", "Machine")
 ```
 
 macOS:
 
 ```bash
-sudo curl -L https://github.com/podkolzzzin/tgcli/releases/download/v4.0.2/tgcli-osx-x64 -o /usr/local/bin/tgcli && sudo chmod +x /usr/local/bin/tgcli
+sudo curl -L https://github.com/podkolzzzin/tgcli/releases/download/v5.0.0/tgcli-osx-x64 -o /usr/local/bin/tgcli && sudo chmod +x /usr/local/bin/tgcli
 ```
 
 Then open a new terminal and run:
@@ -60,6 +60,8 @@ tgcli search "some chat"
 tgcli chat messages --chat-id 123456789
 tgcli chat export --chat-id 123456789 --format md --output chat.md
 tgcli chat export --chat-id 123456789 --all-history --format jsonl --output chat.jsonl --fail-incomplete
+tgcli channel metrics --chat-id 123456789 --format json
+tgcli channel comments --chat-id 123456789 --post-id 42 --format jsonl
 tgcli chat context --chat-id 123456789 --message-id 987654321 --before 10 --after 10
 tgcli diagnostics --format json
 tgcli download --chat-id 123456789 --message-id 987654321 --output ./files
@@ -69,11 +71,13 @@ tgcli download --chat-id 123456789 --message-id 987654321 --output ./files
 
 ## Export schema and completeness
 
-JSONL exports use the versioned `tgcli.message/4.0` schema. Each record includes stable sender ids and separate display-name/username fields; source chat and message ids; resolved reply chat/message ids and a target preview; edit time; forwarding origin; reactions; polls; structured entities and service events; and complete attachment metadata. Telegram history does not return deleted message bodies. A complete `--incremental` refresh emits explicit tombstones for records that disappeared from the current history.
+JSONL exports use the versioned `tgcli.message/5.0` schema. Each record includes stable sender ids and separate display-name/username fields; source chat and message ids; top-level `short_message_id` and `tg_url`; resolved reply chat/message ids and a target preview; edit time; forwarding origin; channel metrics; polls; structured entities and service events; and complete attachment metadata. Telegram history does not return deleted message bodies. A complete `--incremental` refresh emits explicit tombstones for records that disappeared from the current history.
 
-`--all-history` follows basic-group to supergroup migrations and produces one chronological, deduplicated stream. A sibling `<output>.manifest.json` records source chats, boundaries, per-chat and total page counts, retries, gaps, inaccessible messages, duplicates, termination reason, completeness, counts, and a resume token. Fresh writes and manifest updates are atomic.
+`--all-history` follows basic-group to supergroup migrations and produces one chronological, deduplicated stream. For channels, it also probes older public post ids when TDLib returns short history pages. A sibling `<output>.manifest.json` records source chats, boundaries, public id range, missing public ids, per-chat and total page counts, retries, gaps, inaccessible messages, duplicates, termination reason, completeness, counts, and a resume token. Fresh writes and manifest updates are atomic.
 
 Use `--fields chat_id,message_id,text` for a stable projection. Use `--since-message-id`, `--since-date`, or `--resume-token` to limit a later export. `--resume` deduplicates an existing JSONL cache; `--incremental` also emits deletion tombstones after a complete refresh. `--transcribe-command <executable>` passes each downloaded voice/video-note path as the final argument and labels stdout as generated transcription text.
+
+`channel metrics` emits one row per post with views, forwards, replies, reactions, paid reactions, link domains, and engagement rate. `channel comments` resolves Telegram discussion threads and includes `channel_post_id`, `discussion_chat_id`, and `discussion_message_id` for each exported row.
 
 ## ID semantics
 

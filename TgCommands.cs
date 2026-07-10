@@ -458,6 +458,315 @@ public sealed class MessageCommands
     }
 }
 
+public sealed class ChannelCommands
+{
+    /// <summary>
+    /// Export per-post channel metrics and optional aggregates.
+    /// </summary>
+    public async Task Metrics(
+        long chatId,
+        long fromPostId = 0,
+        long toPostId = 0,
+        string? sinceDate = null,
+        string? untilDate = null,
+        string format = "jsonl",
+        int maxPages = 1000,
+        bool local = false,
+        string? session = null)
+    {
+        await using var tg = await TelegramSession.CreateReadyAsync(session);
+        var history = await ChatHistory.FetchAsync(tg, chatId, all: true, local, maxPages, followMigrations: false);
+        var since = ParseOptionalDate(sinceDate);
+        var until = ParseOptionalDate(untilDate);
+        var rows = history.Messages
+            .Select(x => ToMetricRow(x.Message))
+            .Where(row => (fromPostId == 0 || row.Value<long>("post_id") >= fromPostId)
+                && (toPostId == 0 || row.Value<long>("post_id") <= toPostId)
+                && (since is null || DateTimeOffset.Parse(row.Value<string>("date")!, CultureInfo.InvariantCulture) >= since)
+                && (until is null || DateTimeOffset.Parse(row.Value<string>("date")!, CultureInfo.InvariantCulture) <= until))
+            .OrderBy(row => row.Value<long>("post_id"))
+            .ToArray();
+
+        switch (format.Trim().ToLowerInvariant())
+        {
+            case "jsonl":
+                foreach (var row in rows) Console.WriteLine(row.ToString(Formatting.None));
+                break;
+            case "json":
+                Console.WriteLine(new JObject
+                {
+                    ["chat_id"] = chatId,
+                    ["post_count"] = rows.Length,
+                    ["aggregates"] = BuildMetricAggregates(rows),
+                    ["posts"] = new JArray(rows)
+                }.ToString(Formatting.None));
+                break;
+            case "csv":
+                Console.WriteLine("post_id,message_id,date,kind,text_length,link_domains,view_count,forward_count,reply_count,reaction_count,paid_reaction_count,engagement_rate");
+                foreach (var row in rows)
+                {
+                    Console.WriteLine(string.Join(',',
+                        row.Value<long>("post_id"),
+                        row.Value<long>("message_id"),
+                        Csv(row.Value<string>("date")),
+                        Csv(row.Value<string>("kind")),
+                        row.Value<int>("text_length"),
+                        Csv(string.Join(';', row["link_domains"]!.Values<string>())),
+                        row.Value<int>("view_count"),
+                        row.Value<int>("forward_count"),
+                        row.Value<int>("reply_count"),
+                        row.Value<int>("reaction_count"),
+                        row.Value<long>("paid_reaction_count"),
+                        row.Value<double>("engagement_rate").ToString("0.######", CultureInfo.InvariantCulture)));
+                }
+                break;
+            default:
+                throw new ArgumentException("Format must be one of: jsonl, json, csv.", nameof(format));
+        }
+    }
+
+    /// <summary>
+    /// Export comments for one channel post or for all fetched channel posts.
+    /// </summary>
+    public async Task Comments(
+        long chatId,
+        long postId = 0,
+        bool all = false,
+        bool summary = false,
+        string format = "jsonl",
+        int maxPages = 1000,
+        string? session = null)
+    {
+        if (postId == 0 && !all)
+        {
+            throw new ArgumentException("Provide --post-id or --all.", nameof(postId));
+        }
+
+        await using var tg = await TelegramSession.CreateReadyAsync(session);
+        var postIds = all
+            ? (await ChatHistory.FetchAsync(tg, chatId, all: true, local: false, maxPages, followMigrations: false))
+                .Messages.Select(x => ChatHistory.GetShortMessageId(x.Message.Id)).Where(x => x > 0).Order().ToArray()
+            : [postId];
+        var rows = new List<JObject>();
+
+        foreach (var publicPostId in postIds)
+        {
+            rows.AddRange(await FetchCommentRowsAsync(tg, chatId, publicPostId, maxPages));
+        }
+
+        if (summary)
+        {
+            rows = BuildCommentSummaries(rows);
+        }
+
+        switch (format.Trim().ToLowerInvariant())
+        {
+            case "jsonl":
+                foreach (var row in rows) Console.WriteLine(row.ToString(Formatting.None));
+                break;
+            case "json":
+                Console.WriteLine(new JArray(rows).ToString(Formatting.None));
+                break;
+            default:
+                throw new ArgumentException("Format must be one of: jsonl, json.", nameof(format));
+        }
+    }
+
+    private static JObject ToMetricRow(TdApi.Message message)
+    {
+        var metrics = ExportSchema.ToMetricsJson(message.InteractionInfo);
+        var text = MessageFiles.GetMessageText(message.Content);
+        var reactionCount = metrics["reaction_counts"]!.Sum(x => x.Value<int>("count"));
+        var views = metrics.Value<int>("view_count");
+        return new JObject
+        {
+            ["post_id"] = ChatHistory.GetShortMessageId(message.Id),
+            ["message_id"] = message.Id,
+            ["chat_id"] = message.ChatId,
+            ["date"] = DateTimeOffset.FromUnixTimeSeconds(message.Date).ToString("O", CultureInfo.InvariantCulture),
+            ["kind"] = MessageFiles.GetKind(message.Content),
+            ["text_length"] = text.Length,
+            ["link_domains"] = new JArray(ExtractDomains(text)),
+            ["view_count"] = metrics["view_count"],
+            ["forward_count"] = metrics["forward_count"],
+            ["reply_count"] = metrics["reply_count"],
+            ["reaction_count"] = reactionCount,
+            ["reaction_counts"] = metrics["reaction_counts"],
+            ["paid_reaction_count"] = metrics["paid_reaction_count"],
+            ["has_comments"] = metrics["has_comments"],
+            ["engagement_rate"] = views <= 0 ? 0 : (metrics.Value<int>("forward_count") + metrics.Value<int>("reply_count") + reactionCount) / (double)views
+        };
+    }
+
+    private static JObject BuildMetricAggregates(IReadOnlyCollection<JObject> rows) => new()
+    {
+        ["view_count"] = rows.Sum(x => x.Value<int>("view_count")),
+        ["forward_count"] = rows.Sum(x => x.Value<int>("forward_count")),
+        ["reply_count"] = rows.Sum(x => x.Value<int>("reply_count")),
+        ["reaction_count"] = rows.Sum(x => x.Value<int>("reaction_count")),
+        ["paid_reaction_count"] = rows.Sum(x => x.Value<long>("paid_reaction_count")),
+        ["posts_with_comments"] = rows.Count(x => x.Value<bool>("has_comments")),
+        ["top_posts_by_views"] = new JArray(rows.OrderByDescending(x => x.Value<int>("view_count")).Take(10).Select(x => new JObject
+        {
+            ["post_id"] = x["post_id"],
+            ["view_count"] = x["view_count"]
+        }))
+    };
+
+    private static async Task<List<JObject>> FetchCommentRowsAsync(TelegramSession tg, long channelChatId, long publicPostId, int maxPages)
+    {
+        var channelMessageId = ChatHistory.ToChannelMessageId(publicPostId);
+        var rows = new List<JObject>();
+        TdApi.MessageThreadInfo thread;
+        try
+        {
+            thread = await tg.Client.ExecuteAsync(new TdApi.GetMessageThread
+            {
+                ChatId = channelChatId,
+                MessageId = channelMessageId
+            });
+        }
+        catch (Exception ex)
+        {
+            rows.Add(new JObject
+            {
+                ["channel_chat_id"] = channelChatId,
+                ["channel_post_id"] = publicPostId,
+                ["channel_message_id"] = channelMessageId,
+                ["is_inaccessible"] = true,
+                ["error"] = ex.Message
+            });
+            return rows;
+        }
+
+        var seen = new HashSet<long>();
+        AddCommentRows(rows, thread.Messages ?? [], seen, channelChatId, publicPostId, channelMessageId, thread.ChatId, thread.MessageThreadId);
+        var cursor = rows.Select(x => x.Value<long?>("message_id")).Where(x => x is not null and not 0).Min() ?? 0;
+        for (var page = 0; page < Math.Max(1, maxPages); page++)
+        {
+            var history = await tg.Client.ExecuteAsync(new TdApi.GetMessageThreadHistory
+            {
+                ChatId = thread.ChatId,
+                MessageId = thread.MessageThreadId,
+                FromMessageId = cursor,
+                Offset = 0,
+                Limit = 100
+            });
+            if (history.Messages_.Length == 0)
+            {
+                break;
+            }
+
+            AddCommentRows(rows, history.Messages_, seen, channelChatId, publicPostId, channelMessageId, thread.ChatId, thread.MessageThreadId);
+            cursor = history.Messages_.Min(x => x.Id);
+            if (history.Messages_.Length < 100)
+            {
+                break;
+            }
+        }
+
+        return rows;
+    }
+
+    private static void AddCommentRows(
+        List<JObject> rows,
+        IEnumerable<TdApi.Message> comments,
+        HashSet<long> seen,
+        long channelChatId,
+        long publicPostId,
+        long channelMessageId,
+        long discussionChatId,
+        long discussionMessageId)
+    {
+        foreach (var comment in comments.OrderBy(x => x.Id))
+        {
+            if (!seen.Add(comment.Id))
+            {
+                continue;
+            }
+
+            rows.Add(new JObject
+            {
+                ["channel_chat_id"] = channelChatId,
+                ["channel_post_id"] = publicPostId,
+                ["channel_message_id"] = channelMessageId,
+                ["discussion_chat_id"] = discussionChatId,
+                ["discussion_message_id"] = discussionMessageId,
+                ["comment_chat_id"] = comment.ChatId,
+                ["message_id"] = comment.Id,
+                ["date"] = DateTimeOffset.FromUnixTimeSeconds(comment.Date).ToString("O", CultureInfo.InvariantCulture),
+                ["sender"] = FormatSender(comment.SenderId),
+                ["text"] = MessageFiles.GetMessageText(comment.Content),
+                ["reply_to_message_id"] = comment.ReplyTo is TdApi.MessageReplyTo.MessageReplyToMessage reply ? reply.MessageId : JValue.CreateNull(),
+                ["reaction_counts"] = ExportSchema.ToMetricsJson(comment.InteractionInfo)["reaction_counts"],
+                ["is_thread_root"] = comment.Id == discussionMessageId,
+                ["is_inaccessible"] = false
+            });
+        }
+    }
+
+    private static List<JObject> BuildCommentSummaries(IEnumerable<JObject> rows)
+    {
+        return rows.GroupBy(x => x.Value<long>("channel_post_id"))
+            .OrderBy(x => x.Key)
+            .Select(group =>
+            {
+                var values = group.ToArray();
+                var comments = values.Where(x => x.Value<bool?>("is_inaccessible") != true && x.Value<bool?>("is_thread_root") != true).ToArray();
+                var dates = comments.Select(x => DateTimeOffset.Parse(x.Value<string>("date")!, CultureInfo.InvariantCulture)).Order().ToArray();
+                return new JObject
+                {
+                    ["channel_post_id"] = group.Key,
+                    ["channel_chat_id"] = values.First().Value<long>("channel_chat_id"),
+                    ["channel_message_id"] = values.First().Value<long>("channel_message_id"),
+                    ["discussion_chat_id"] = values.First().Value<long?>("discussion_chat_id") is long discussionChatId ? discussionChatId : JValue.CreateNull(),
+                    ["discussion_message_id"] = values.First().Value<long?>("discussion_message_id") is long discussionMessageId ? discussionMessageId : JValue.CreateNull(),
+                    ["comment_count"] = comments.Length,
+                    ["unique_commenters"] = comments.Select(x => x.Value<string>("sender")).Where(x => !string.IsNullOrWhiteSpace(x)).Distinct().Count(),
+                    ["top_commenters"] = new JArray(comments
+                        .Select(x => x.Value<string>("sender"))
+                        .Where(x => !string.IsNullOrWhiteSpace(x))
+                        .GroupBy(x => x!)
+                        .OrderByDescending(x => x.Count())
+                        .ThenBy(x => x.Key, StringComparer.Ordinal)
+                        .Take(10)
+                        .Select(x => new JObject { ["sender"] = x.Key, ["count"] = x.Count() })),
+                    ["first_comment_date"] = dates.Length == 0 ? JValue.CreateNull() : dates[0].ToString("O", CultureInfo.InvariantCulture),
+                    ["last_comment_date"] = dates.Length == 0 ? JValue.CreateNull() : dates[^1].ToString("O", CultureInfo.InvariantCulture),
+                    ["has_inaccessible_marker"] = values.Any(x => x.Value<bool?>("is_inaccessible") == true)
+                };
+            })
+            .ToList();
+    }
+
+    private static IEnumerable<string> ExtractDomains(string text)
+    {
+        foreach (System.Text.RegularExpressions.Match match in System.Text.RegularExpressions.Regex.Matches(text, @"https?://[^\s<>)]+"))
+        {
+            if (Uri.TryCreate(match.Value, UriKind.Absolute, out var uri) && !string.IsNullOrWhiteSpace(uri.Host))
+            {
+                yield return uri.Host.ToLowerInvariant();
+            }
+        }
+    }
+
+    private static DateTimeOffset? ParseOptionalDate(string? value) =>
+        string.IsNullOrWhiteSpace(value) ? null : DateTimeOffset.Parse(value, CultureInfo.InvariantCulture);
+
+    private static string FormatSender(TdApi.MessageSender? sender) => sender switch
+    {
+        TdApi.MessageSender.MessageSenderUser user => $"user:{user.UserId}",
+        TdApi.MessageSender.MessageSenderChat chat => $"chat:{chat.ChatId}",
+        _ => string.Empty
+    };
+
+    private static string Csv(string? value)
+    {
+        value ??= string.Empty;
+        return "\"" + value.Replace("\"", "\"\"") + "\"";
+    }
+}
+
 public sealed class ChatCommands
 {
     /// <summary>
@@ -498,6 +807,7 @@ public sealed class ChatCommands
     /// <param name="all">Fetch all pages until history ends or max-pages is reached.</param>
     /// <param name="maxPages">Maximum pages to fetch with --all.</param>
     /// <param name="format">Output format: tsv, jsonl, md.</param>
+    /// <param name="schema">JSON/JSONL schema: simple or rich.</param>
     /// <param name="session">Session directory. Defaults to ~/.local/share/tgcli.</param>
     public async Task Messages(
         long chatId,
@@ -510,6 +820,7 @@ public sealed class ChatCommands
         bool serviceOnly = false,
         string? kind = null,
         string format = "tsv",
+        string schema = "simple",
         int lockTimeout = 30,
         bool noWait = false,
         string? session = null)
@@ -525,7 +836,28 @@ public sealed class ChatCommands
             ? history!.Messages.Select(x => x.Message)
             : (await tg.Client.GetChatHistoryAsync(chatId, fromMessageId, offset, ClampLimit(limit, 100), local)).Messages_;
 
-        await Output.PrintMessagesAsync(tg, FilterMessages(messages, serviceOnly, kind), format);
+        var filtered = FilterMessages(messages, serviceOnly, kind).ToArray();
+        var parsedFormat = Output.ParseFormat(format);
+        if (schema.Equals("rich", StringComparison.OrdinalIgnoreCase))
+        {
+            if (parsedFormat is not (OutputFormat.Jsonl or OutputFormat.Json))
+            {
+                throw new ArgumentException("--schema rich requires --format jsonl or --format json.", nameof(schema));
+            }
+
+            var exported = all
+                ? history!.Messages.Where(x => filtered.Any(message => message.ChatId == x.Message.ChatId && message.Id == x.Message.Id))
+                : filtered.Select(x => new ExportedMessage(x, x.ChatId, x.ChatId, x.Id));
+            await Output.WriteExportedMessagesAsync(Console.Out, tg, exported, parsedFormat, includeLinks: true);
+            return;
+        }
+
+        if (!schema.Equals("simple", StringComparison.OrdinalIgnoreCase))
+        {
+            throw new ArgumentException("--schema must be one of: simple, rich.", nameof(schema));
+        }
+
+        await Output.PrintMessagesAsync(tg, filtered, format);
     }
 
     /// <summary>

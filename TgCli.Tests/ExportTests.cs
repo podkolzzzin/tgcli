@@ -23,19 +23,21 @@ public sealed class ExportTests
         };
         history.SourceChats.Add(-1001);
         history.PagesByChat[-1001] = 3;
-        history.OldestReachableByChat[-1001] = 42;
+        history.OldestReachableByChat[-1001] = ChatHistory.ToChannelMessageId(42);
         history.Messages.Add(new ExportedMessage(
-            new TdApi.Message { ChatId = -1001, Id = 42, Date = 1_700_000_000 },
-            -1001, -1001, 42));
+            new TdApi.Message { ChatId = -1001, Id = ChatHistory.ToChannelMessageId(42), Date = 1_700_000_000 },
+            -1001, -1001, ChatHistory.ToChannelMessageId(42)));
 
         var manifest = ChatHistory.BuildManifest(history);
 
         Assert.Equal(1, manifest.Value<int>("message_count"));
+        Assert.Equal(1, manifest.Value<int>("fetched_count"));
         Assert.Equal("max_pages_reached", manifest.Value<string>("termination_reason"));
         Assert.False(manifest.Value<bool>("complete"));
         Assert.Equal(3, manifest.Value<int>("pages_fetched"));
         Assert.NotNull(manifest["oldest_reachable_message_by_chat"]);
         Assert.NotNull(manifest["newest_fetched_message"]);
+        Assert.Equal(0, manifest["public_id_range"]!.Value<int>("missing_count"));
     }
 
     [Fact]
@@ -44,10 +46,71 @@ public sealed class ExportTests
         var value = ExportSchema.Tombstone(10, 20);
 
         Assert.Equal("tgcli.message", value.Value<string>("schema"));
-        Assert.Equal("4.0", value.Value<string>("schema_version"));
+        Assert.Equal("5.0", value.Value<string>("schema_version"));
         Assert.True(value.Value<bool>("is_deleted"));
         Assert.Equal(10, value.Value<long>("chat_id"));
         Assert.Equal(20, value.Value<long>("message_id"));
+    }
+
+    [Fact]
+    public void ChannelMessageIdsRoundTripThroughPublicIds()
+    {
+        var messageId = ChatHistory.ToChannelMessageId(575);
+
+        Assert.Equal(602931200, messageId);
+        Assert.Equal(575, ChatHistory.GetShortMessageId(messageId));
+    }
+
+    [Fact]
+    public void ManifestReportsChannelPublicIdGaps()
+    {
+        var history = new HistoryFetchResult { Complete = true };
+        history.SourceChats.Add(-1001);
+        history.Messages.Add(new ExportedMessage(new TdApi.Message { ChatId = -1001, Id = ChatHistory.ToChannelMessageId(1), Date = 100 }, -1001, -1001, ChatHistory.ToChannelMessageId(1)));
+        history.Messages.Add(new ExportedMessage(new TdApi.Message { ChatId = -1001, Id = ChatHistory.ToChannelMessageId(3), Date = 300 }, -1001, -1001, ChatHistory.ToChannelMessageId(3)));
+
+        var manifest = ChatHistory.BuildManifest(history);
+        var range = manifest["public_id_range"]!;
+
+        Assert.Equal(1, range.Value<long>("first"));
+        Assert.Equal(3, range.Value<long>("last"));
+        Assert.Equal(1, range.Value<int>("missing_count"));
+        Assert.Equal(2, range["missing_public_ids"]![0]!.Value<long>());
+        Assert.Equal(1, manifest["first_post"]!.Value<long>("public_id"));
+        Assert.Equal(3, manifest["last_post"]!.Value<long>("public_id"));
+    }
+
+    [Fact]
+    public void MetricsFlattenMessageInteractionInfo()
+    {
+        var metrics = ExportSchema.ToMetricsJson(new TdApi.MessageInteractionInfo
+        {
+            ViewCount = 120,
+            ForwardCount = 7,
+            ReplyInfo = new TdApi.MessageReplyInfo { ReplyCount = 3 },
+            Reactions = new TdApi.MessageReactions
+            {
+                Reactions =
+                [
+                    new TdApi.MessageReaction
+                    {
+                        Type = new TdApi.ReactionType.ReactionTypeEmoji { Emoji = "\ud83d\udc4d" },
+                        TotalCount = 5,
+                        IsChosen = true
+                    }
+                ],
+                PaidReactors = [new TdApi.PaidReactor { StarCount = 2 }]
+            }
+        });
+
+        Assert.Equal(120, metrics.Value<int>("view_count"));
+        Assert.Equal(7, metrics.Value<int>("forward_count"));
+        Assert.Equal(3, metrics.Value<int>("reply_count"));
+        Assert.True(metrics.Value<bool>("has_comments"));
+        Assert.Equal(2, metrics.Value<long>("paid_reaction_count"));
+        Assert.Equal("emoji", metrics["reaction_counts"]![0]!.Value<string>("type"));
+        Assert.Equal("\ud83d\udc4d", metrics["reaction_counts"]![0]!.Value<string>("emoji"));
+        Assert.Equal(5, metrics["reaction_counts"]![0]!.Value<int>("count"));
     }
 
     [Fact]

@@ -5,7 +5,7 @@ description: Use this project-scoped skill when Codex needs to inspect Telegram 
 
 # tgcli
 
-Use `tgcli --help` or `<command> --help` if flags may have changed. Prefer v4 commands (`tgcli --version` => `4.x`) for the versioned rich export schema, migration-aware export, integrity manifests, incremental caches, diagnostics, and conversation context.
+Use `tgcli --help` or `<command> --help` if flags may have changed. Prefer v5 commands (`tgcli --version` => `5.x`) for the versioned rich export schema, channel-aware pagination, integrity manifests, channel metrics/comments, incremental caches, diagnostics, and conversation context.
 
 Core flow:
 
@@ -13,11 +13,12 @@ Core flow:
 2. Resolve exact usernames: `tgcli chat resolve --username <handle> --format jsonl`. Fallback: `tgcli search --query "<title-or-username>" --server --format jsonl`.
 3. Inspect migrations when history may span a basic-group -> supergroup upgrade: `tgcli chat migrations --chat-id <id> --format json`.
 4. Cache chats with full migrated history: `tgcli chat export --chat-id <id> --all-history --format md --output <file.md> --include-links --fail-incomplete`. Use `--format jsonl` for analysis.
-5. Read/search messages: `tgcli chat messages --chat-id <id> --all --format jsonl`; `tgcli chat search --chat-id <id> --query "<text>" --all --format jsonl`.
+5. Read/search messages: `tgcli chat messages --chat-id <id> --all --format jsonl`; use `--schema rich` when message listings must match export JSONL rows. Search with `tgcli chat search --chat-id <id> --query "<text>" --all --format jsonl`.
 6. Batch search: put one query per line in a file, then run `tgcli chat search --chat-id <id> --queries <queries.txt> --all --format jsonl`.
-7. Build links: `tgcli link message --chat-id <id> --message-id <message-id> --format json`.
-8. Inspect one message with files/links: `tgcli message get --chat-id <id> --message-id <message-id> --format json`.
-9. Download files by message when possible: `tgcli download --chat-id <id> --message-id <message-id> --output <path>`. Fallback: `tgcli download --type <type> --attachment-id <file-id-or-remote-id> --output <path>`.
+7. For channels, inspect metrics with `tgcli channel metrics --chat-id <id> --format json` and comments/discussion mapping with `tgcli channel comments --chat-id <id> --post-id <short-id> --format jsonl`.
+8. Build links: `tgcli link message --chat-id <id> --message-id <message-id> --format json`.
+9. Inspect one message with files/links: `tgcli message get --chat-id <id> --message-id <message-id> --format json`.
+10. Download files by message when possible: `tgcli download --chat-id <id> --message-id <message-id> --output <path>`. Fallback: `tgcli download --type <type> --attachment-id <file-id-or-remote-id> --output <path>`.
 
 Message links:
 
@@ -30,13 +31,19 @@ Message links:
 
 Export integrity and caching:
 
-- `chat export --all-history` follows basic-group -> supergroup migrations automatically, preserves original `chat_id`/`message_id`, and deduplicates messages.
-- Export writes an integrity manifest to stderr and `<output>.manifest.json` with count, date boundaries, source chats, pages fetched, duplicate count, warnings, and completeness.
+- `chat export --all-history` follows basic-group -> supergroup migrations automatically, preserves original `chat_id`/`message_id`, and deduplicates messages. For channels, it probes older public post ids when TDLib returns short pages.
+- Export writes an integrity manifest to stderr and `<output>.manifest.json` with count, date boundaries, source chats, pages fetched, duplicate count, warnings, completeness, and for channels the public id range, missing public ids, fetched count, first post, and last post.
 - Use `--expect-since <date>`, `--expect-count-min <n>`, and `--fail-incomplete` when the export must meet known coverage requirements.
 - Use `--resume` or `--incremental` only with existing JSONL caches; tgcli validates cached JSONL before appending and uses atomic writes for fresh exports.
-- JSONL uses schema `tgcli.message/4.0`; use `--fields` for stable projections, `--since-message-id`, `--since-date`, or `--resume-token` for incremental runs, and `--transcribe-command` for opt-in voice/video-note transcription.
+- JSONL uses schema `tgcli.message/5.0`; use `--fields` for stable projections, `--since-message-id`, `--since-date`, or `--resume-token` for incremental runs, and `--transcribe-command` for opt-in voice/video-note transcription. v5 rows include top-level `short_message_id`, `tg_url`, `view_count`, `forward_count`, `reply_count`, `reaction_counts`, `paid_reaction_count`, and `has_comments`.
 - `tgcli diagnostics --format json` checks the session, TDLib version, authenticated account, local database, and network.
 - `tgcli chat context --chat-id <id> --message-id <id> --before 5 --after 5` returns a validation window and reply chain.
+
+Channel analytics:
+
+- `tgcli channel metrics --chat-id <id> --format jsonl|json|csv` emits per-post metrics, link domains, and engagement rate; JSON output includes aggregates and top posts by views.
+- `tgcli channel comments --chat-id <id> --post-id <short_message_id> --format jsonl|json` resolves the linked discussion thread and preserves `channel_post_id -> discussion_chat_id -> discussion_message_id`.
+- Add `--summary` to `channel comments` for per-post comment count, unique commenters, top commenters, first/last comment date, and inaccessible markers.
 
 Service messages and stats:
 

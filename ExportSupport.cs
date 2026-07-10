@@ -25,6 +25,8 @@ internal sealed class HistoryFetchResult
 
 internal static class ChatHistory
 {
+    private const int ChannelMessageIdShift = 20;
+
     public static async Task<HistoryFetchResult> FetchAsync(TelegramSession tg, long chatId, bool all, bool local, int maxPages, bool followMigrations)
     {
         var result = new HistoryFetchResult();
@@ -34,9 +36,11 @@ internal static class ChatHistory
         foreach (var sourceChatId in chain)
         {
             result.SourceChats.Add(sourceChatId);
+            var isChannel = await IsChannelAsync(tg, sourceChatId);
             var cursor = 0L;
             var exhausted = false;
-            for (var page = 0; page < (all ? Math.Max(1, maxPages) : 1); page++)
+            var pageLimit = all ? Math.Max(1, maxPages) : 1;
+            for (var page = 0; page < pageLimit; page++)
             {
                 TdApi.Messages history;
                 var attempt = 0;
@@ -58,10 +62,21 @@ internal static class ChatHistory
                 result.PagesByChat[sourceChatId] = result.PagesByChat.GetValueOrDefault(sourceChatId) + 1;
                 if (history.Messages_.Length == 0)
                 {
+                    if (isChannel && TryMoveToPreviousChannelAnchor(ref cursor))
+                    {
+                        if (StopAtMaxPages(result, sourceChatId, maxPages, page, pageLimit))
+                        {
+                            break;
+                        }
+
+                        continue;
+                    }
+
                     exhausted = true;
                     break;
                 }
 
+                var newMessages = 0;
                 foreach (var message in history.Messages_)
                 {
                     if (!seen.Add((message.ChatId, message.Id)))
@@ -71,20 +86,41 @@ internal static class ChatHistory
                     }
 
                     result.Messages.Add(new ExportedMessage(message, sourceChatId, message.ChatId, message.Id));
+                    newMessages++;
                 }
 
-                cursor = history.Messages_.Min(x => x.Id);
+                var oldestMessageId = history.Messages_.Min(x => x.Id);
+                cursor = oldestMessageId;
+                if (newMessages == 0 && isChannel && TryMoveToPreviousChannelAnchor(ref cursor))
+                {
+                    if (StopAtMaxPages(result, sourceChatId, maxPages, page, pageLimit))
+                    {
+                        break;
+                    }
+
+                    continue;
+                }
+
                 if (!all || history.Messages_.Length < 100)
                 {
+                    if (isChannel && GetShortMessageId(oldestMessageId) > 1)
+                    {
+                        result.Warnings.Add($"Short channel history page ({history.Messages_.Length} messages) at public id {GetShortMessageId(oldestMessageId)}; probing older public ids.");
+                        if (StopAtMaxPages(result, sourceChatId, maxPages, page, pageLimit))
+                        {
+                            break;
+                        }
+
+                        continue;
+                    }
+
                     exhausted = all;
                     break;
                 }
 
-                if (page == Math.Max(1, maxPages) - 1)
+                if (StopAtMaxPages(result, sourceChatId, maxPages, page, pageLimit))
                 {
-                    result.Complete = false;
-                    result.TerminationReason = "max_pages_reached";
-                    result.Warnings.Add($"Stopped at --max-pages={maxPages} for chat {sourceChatId}; history may be incomplete.");
+                    break;
                 }
             }
 
@@ -105,6 +141,48 @@ internal static class ChatHistory
             return byDate != 0 ? byDate : a.Message.Id.CompareTo(b.Message.Id);
         });
         return result;
+    }
+
+    private static bool StopAtMaxPages(HistoryFetchResult result, long sourceChatId, int maxPages, int page, int pageLimit)
+    {
+        if (page != pageLimit - 1)
+        {
+            return false;
+        }
+
+        result.Complete = false;
+        result.TerminationReason = "max_pages_reached";
+        result.Warnings.Add($"Stopped at --max-pages={maxPages} for chat {sourceChatId}; history may be incomplete.");
+        return true;
+    }
+
+    public static long GetShortMessageId(long messageId) => messageId >> ChannelMessageIdShift;
+
+    public static long ToChannelMessageId(long shortMessageId) => shortMessageId << ChannelMessageIdShift;
+
+    private static bool TryMoveToPreviousChannelAnchor(ref long cursor)
+    {
+        var shortMessageId = GetShortMessageId(cursor);
+        if (shortMessageId <= 1)
+        {
+            return false;
+        }
+
+        cursor = ToChannelMessageId(shortMessageId - 1);
+        return true;
+    }
+
+    private static async Task<bool> IsChannelAsync(TelegramSession tg, long chatId)
+    {
+        try
+        {
+            var chat = await tg.Client.GetChatAsync(chatId);
+            return chat.Type is TdApi.ChatType.ChatTypeSupergroup { IsChannel: true };
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     public static async Task<IReadOnlyList<long>> GetMigrationChainAsync(TelegramSession tg, long chatId)
@@ -157,9 +235,17 @@ internal static class ChatHistory
     {
         var messages = history.Messages;
         var dates = messages.Select(x => x.Message.Date).Where(x => x > 0).ToArray();
-        return new JObject
+        var publicIds = messages
+            .Select(x => GetShortMessageId(x.Message.Id))
+            .Where(x => x > 0)
+            .Distinct()
+            .Order()
+            .ToArray();
+        var missingPublicIds = GetMissingPublicIds(publicIds);
+        var manifest = new JObject
         {
             ["message_count"] = messages.Count,
+            ["fetched_count"] = messages.Count,
             ["first_date"] = dates.Length == 0 ? JValue.CreateNull() : FormatDate(dates.Min()),
             ["last_date"] = dates.Length == 0 ? JValue.CreateNull() : FormatDate(dates.Max()),
             ["source_chats"] = new JArray(history.SourceChats.Distinct()),
@@ -179,6 +265,56 @@ internal static class ChatHistory
             ["warnings"] = new JArray(history.Warnings),
             ["complete"] = history.Complete
         };
+
+        if (publicIds.Length > 0)
+        {
+            var firstPost = messages.Where(x => x.Message.Date > 0).MinBy(x => x.Message.Date) ?? messages.MinBy(x => x.Message.Id)!;
+            var lastPost = messages.Where(x => x.Message.Date > 0).MaxBy(x => x.Message.Date) ?? messages.MaxBy(x => x.Message.Id)!;
+            var latestPublicId = publicIds[^1];
+            var missing = missingPublicIds.ToArray();
+            manifest["public_id_range"] = new JObject
+            {
+                ["first"] = publicIds[0],
+                ["last"] = latestPublicId,
+                ["missing_count"] = missing.Length,
+                ["missing_public_ids"] = new JArray(missing)
+            };
+            manifest["first_post"] = ToPostBoundary(firstPost);
+            manifest["last_post"] = ToPostBoundary(lastPost);
+
+            if (latestPublicId > messages.Count && latestPublicId - messages.Count > Math.Max(10, latestPublicId / 20))
+            {
+                history.Warnings.Add($"Latest public id {latestPublicId} is much higher than exported count {messages.Count}; inspect public_id_range.missing_public_ids for gaps.");
+                ((JArray)manifest["warnings"]!).Add(history.Warnings[^1]);
+            }
+        }
+
+        return manifest;
+    }
+
+    private static JObject ToPostBoundary(ExportedMessage item) => new()
+    {
+        ["chat_id"] = item.Message.ChatId,
+        ["message_id"] = item.Message.Id,
+        ["public_id"] = GetShortMessageId(item.Message.Id),
+        ["date"] = item.Message.Date == 0 ? JValue.CreateNull() : FormatDate(item.Message.Date)
+    };
+
+    private static IEnumerable<long> GetMissingPublicIds(long[] publicIds)
+    {
+        if (publicIds.Length < 2)
+        {
+            yield break;
+        }
+
+        var present = publicIds.ToHashSet();
+        for (var id = publicIds[0]; id <= publicIds[^1]; id++)
+        {
+            if (!present.Contains(id))
+            {
+                yield return id;
+            }
+        }
     }
 
     public static void ValidateManifest(JObject manifest, DateTimeOffset? expectSince, int expectCountMin, bool failIncomplete)

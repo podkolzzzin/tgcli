@@ -1,5 +1,29 @@
 # Changelog
 
+## 5.0.0
+
+- Fix channel `chat export --all-history` and `chat messages --all` pagination when TDLib returns short pages for channel-style message ids.
+- Add channel export integrity evidence: public id range, missing public ids, fetched count, first/last post boundaries, and short-page warnings.
+- Introduce the versioned `tgcli.message/5.0` JSONL schema with top-level `short_message_id`, `tg_url`, and flattened channel metrics: views, forwards, replies, reaction counts, paid reactions, and comment presence.
+- Add `chat messages --schema rich` for JSON/JSONL output using the same rich message shape as `chat export`.
+- Add `channel metrics` for per-post metrics plus JSON aggregates/CSV output.
+- Add `channel comments` to resolve discussion threads and export the `channel_post_id -> discussion_chat_id -> discussion_message_id` mapping with comment rows, summaries, or inaccessible markers.
+- Verify against `@DevJungles`: 567 accessible posts exported from public id range `1-575`, with 8 missing public ids reported.
+
+Install:
+
+```bash
+sudo curl -L https://github.com/podkolzzzin/tgcli/releases/download/v5.0.0/tgcli-linux-x64 -o /usr/local/bin/tgcli && sudo chmod +x /usr/local/bin/tgcli
+```
+
+```powershell
+New-Item -ItemType Directory -Force "$env:ProgramFiles\tgcli" | Out-Null; Invoke-WebRequest "https://github.com/podkolzzzin/tgcli/releases/download/v5.0.0/tgcli-win-x64.exe" -OutFile "$env:ProgramFiles\tgcli\tgcli.exe"; [Environment]::SetEnvironmentVariable("Path", [Environment]::GetEnvironmentVariable("Path", "Machine") + ";$env:ProgramFiles\tgcli", "Machine")
+```
+
+```bash
+sudo curl -L https://github.com/podkolzzzin/tgcli/releases/download/v5.0.0/tgcli-osx-x64 -o /usr/local/bin/tgcli && sudo chmod +x /usr/local/bin/tgcli
+```
+
 ## 4.0.2
 
 - Fix snake_case JSONL output for `chat messages` and `chat search`.

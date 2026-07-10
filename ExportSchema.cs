@@ -8,7 +8,7 @@ namespace TgCli;
 internal static class ExportSchema
 {
     public const string Name = "tgcli.message";
-    public const string Version = "4.0";
+    public const string Version = "5.0";
 
     public static async Task<JObject> BuildMessageAsync(
         TelegramSession tg,
@@ -30,6 +30,7 @@ internal static class ExportSchema
         }
 
         await AttachmentIndex.RecordAsync(tg.SessionDirectory, message.ChatId, message.Id, MessageFiles.GetAllFiles(message));
+        var metrics = ToMetricsJson(message.InteractionInfo);
 
         return new JObject
         {
@@ -37,6 +38,8 @@ internal static class ExportSchema
             ["schema_version"] = Version,
             ["chat_id"] = message.ChatId,
             ["message_id"] = message.Id,
+            ["short_message_id"] = ChatHistory.GetShortMessageId(message.Id),
+            ["tg_url"] = MessageLinks.GetTgUrl(message.ChatId, message.Id),
             ["source_chat_id"] = item.SourceChatId,
             ["date"] = FormatTimestamp(message.Date),
             ["edit_date"] = message.EditDate == 0 ? JValue.CreateNull() : FormatTimestamp(message.EditDate),
@@ -52,7 +55,13 @@ internal static class ExportSchema
             ["reply_to_message_id"] = replyMessageId is null ? JValue.CreateNull() : replyMessageId,
             ["reply_target"] = replyPreview,
             ["forward_origin"] = ToToken(message.ForwardInfo),
-            ["reactions"] = ToToken(message.InteractionInfo),
+            ["interaction_info"] = ToToken(message.InteractionInfo),
+            ["view_count"] = metrics["view_count"],
+            ["forward_count"] = metrics["forward_count"],
+            ["reply_count"] = metrics["reply_count"],
+            ["reaction_counts"] = metrics["reaction_counts"],
+            ["paid_reaction_count"] = metrics["paid_reaction_count"],
+            ["has_comments"] = metrics["has_comments"],
             ["poll"] = message.Content is TdApi.MessageContent.MessagePoll poll ? ToToken(poll.Poll) : JValue.CreateNull(),
             ["service_event"] = IsService(message.Content) ? ToToken(message.Content) : JValue.CreateNull(),
             ["attachments"] = files,
@@ -76,6 +85,47 @@ internal static class ExportSchema
         ["message_id"] = messageId,
         ["is_deleted"] = true,
         ["tombstone"] = new JObject { ["reason"] = reason ?? "missing_from_incremental_refresh" }
+    };
+
+    internal static JObject ToMetricsJson(TdApi.MessageInteractionInfo? interactionInfo)
+    {
+        var replyCount = interactionInfo?.ReplyInfo?.ReplyCount ?? 0;
+        return new JObject
+        {
+            ["view_count"] = interactionInfo?.ViewCount ?? 0,
+            ["forward_count"] = interactionInfo?.ForwardCount ?? 0,
+            ["reply_count"] = replyCount,
+            ["reaction_counts"] = BuildReactionCounts(interactionInfo?.Reactions),
+            ["paid_reaction_count"] = interactionInfo?.Reactions?.PaidReactors?.Sum(x => x.StarCount) ?? 0,
+            ["has_comments"] = replyCount > 0
+        };
+    }
+
+    private static JArray BuildReactionCounts(TdApi.MessageReactions? reactions)
+    {
+        var rows = new JArray();
+        foreach (var reaction in reactions?.Reactions ?? [])
+        {
+            var (type, emoji, customEmojiId) = FormatReactionType(reaction.Type);
+            rows.Add(new JObject
+            {
+                ["type"] = type,
+                ["emoji"] = emoji is null ? JValue.CreateNull() : emoji,
+                ["custom_emoji_id"] = customEmojiId is null ? JValue.CreateNull() : customEmojiId,
+                ["count"] = reaction.TotalCount,
+                ["chosen"] = reaction.IsChosen
+            });
+        }
+
+        return rows;
+    }
+
+    private static (string Type, string? Emoji, long? CustomEmojiId) FormatReactionType(TdApi.ReactionType? type) => type switch
+    {
+        TdApi.ReactionType.ReactionTypeEmoji emoji => ("emoji", emoji.Emoji, null),
+        TdApi.ReactionType.ReactionTypeCustomEmoji customEmoji => ("custom_emoji", null, customEmoji.CustomEmojiId),
+        TdApi.ReactionType.ReactionTypePaid => ("paid", null, null),
+        _ => ("unknown", null, null)
     };
 
     private static async Task<(string Type, long? UserId, long? ChatId, string DisplayName, string? Username)> ResolveSenderAsync(
