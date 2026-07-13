@@ -18,6 +18,7 @@ internal static class Program
         app.Add<TgCommands>();
         app.Add<ChatCommands>("chat");
         app.Add<ChannelCommands>("channel");
+        app.Add<BotCommands>("bot");
         app.Add<LinkCommands>("link");
         app.Add<MessageCommands>("message");
         app.Add<SessionCommands>("session");

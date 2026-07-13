@@ -1,5 +1,25 @@
 # Changelog
 
+## 6.0.0
+
+- Add `tgcli bot create`, `tgcli bot remove`, `tgcli bot list`, and `tgcli bot token` for BotFather-backed managed bot workflows.
+- Add `tgcli bot write` to send messages to bots, print recent bot messages with UI metadata, and press inline callback buttons by text or `row,column`.
+- Update the TDLib application version reported by tgcli to `6.0.0`.
+
+Install:
+
+```bash
+sudo curl -L https://github.com/podkolzzzin/tgcli/releases/download/v6.0.0/tgcli-linux-x64 -o /usr/local/bin/tgcli && sudo chmod +x /usr/local/bin/tgcli
+```
+
+```powershell
+New-Item -ItemType Directory -Force "$env:ProgramFiles\tgcli" | Out-Null; Invoke-WebRequest "https://github.com/podkolzzzin/tgcli/releases/download/v6.0.0/tgcli-win-x64.exe" -OutFile "$env:ProgramFiles\tgcli\tgcli.exe"; [Environment]::SetEnvironmentVariable("Path", [Environment]::GetEnvironmentVariable("Path", "Machine") + ";$env:ProgramFiles\tgcli", "Machine")
+```
+
+```bash
+sudo curl -L https://github.com/podkolzzzin/tgcli/releases/download/v6.0.0/tgcli-osx-x64 -o /usr/local/bin/tgcli && sudo chmod +x /usr/local/bin/tgcli
+```
+
 ## 5.1.0
 
 - Add `tgcli session export` to write a compact single-line Telegram authorization secret.

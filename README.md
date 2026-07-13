@@ -7,19 +7,19 @@ Small command-line tool for reading Telegram chats with TDLib.
 Linux:
 
 ```bash
-sudo curl -L https://github.com/podkolzzzin/tgcli/releases/download/v5.1.0/tgcli-linux-x64 -o /usr/local/bin/tgcli && sudo chmod +x /usr/local/bin/tgcli
+sudo curl -L https://github.com/podkolzzzin/tgcli/releases/download/v6.0.0/tgcli-linux-x64 -o /usr/local/bin/tgcli && sudo chmod +x /usr/local/bin/tgcli
 ```
 
 Windows PowerShell, as Administrator:
 
 ```powershell
-New-Item -ItemType Directory -Force "$env:ProgramFiles\tgcli" | Out-Null; Invoke-WebRequest "https://github.com/podkolzzzin/tgcli/releases/download/v5.1.0/tgcli-win-x64.exe" -OutFile "$env:ProgramFiles\tgcli\tgcli.exe"; [Environment]::SetEnvironmentVariable("Path", [Environment]::GetEnvironmentVariable("Path", "Machine") + ";$env:ProgramFiles\tgcli", "Machine")
+New-Item -ItemType Directory -Force "$env:ProgramFiles\tgcli" | Out-Null; Invoke-WebRequest "https://github.com/podkolzzzin/tgcli/releases/download/v6.0.0/tgcli-win-x64.exe" -OutFile "$env:ProgramFiles\tgcli\tgcli.exe"; [Environment]::SetEnvironmentVariable("Path", [Environment]::GetEnvironmentVariable("Path", "Machine") + ";$env:ProgramFiles\tgcli", "Machine")
 ```
 
 macOS:
 
 ```bash
-sudo curl -L https://github.com/podkolzzzin/tgcli/releases/download/v5.1.0/tgcli-osx-x64 -o /usr/local/bin/tgcli && sudo chmod +x /usr/local/bin/tgcli
+sudo curl -L https://github.com/podkolzzzin/tgcli/releases/download/v6.0.0/tgcli-osx-x64 -o /usr/local/bin/tgcli && sudo chmod +x /usr/local/bin/tgcli
 ```
 
 Then open a new terminal and run:
@@ -67,6 +67,12 @@ tgcli session import < tgcli.session
 tgcli chat context --chat-id 123456789 --message-id 987654321 --before 10 --after 10
 tgcli diagnostics --format json
 tgcli download --chat-id 123456789 --message-id 987654321 --output ./files
+tgcli bot list
+tgcli bot create --name "Example Bot" --username example_unique_bot
+tgcli bot token --username example_unique_bot
+tgcli bot write --username example_unique_bot --text /start --format json
+tgcli bot write --username example_unique_bot --click "0,0" --message-id 987654321 --format json
+tgcli bot remove --username example_unique_bot --confirm
 ```
 
 `download --output` accepts either a file or directory. Existing directories, paths ending with a path separator, and missing paths without an extension are treated as directories.
@@ -80,6 +86,17 @@ JSONL exports use the versioned `tgcli.message/5.0` schema. Each record includes
 Use `--fields chat_id,message_id,text` for a stable projection. Use `--since-message-id`, `--since-date`, or `--resume-token` to limit a later export. `--resume` deduplicates an existing JSONL cache; `--incremental` also emits deletion tombstones after a complete refresh. `--transcribe-command <executable>` passes each downloaded voice/video-note path as the final argument and labels stdout as generated transcription text.
 
 `channel metrics` emits one row per post with views, forwards, replies, reactions, paid reactions, link domains, and engagement rate. `channel comments` resolves Telegram discussion threads and includes `channel_post_id`, `discussion_chat_id`, and `discussion_message_id` for each exported row.
+
+## Bot management
+
+`tgcli bot` exposes BotFather-backed bot management and bot chat interaction:
+
+- `tgcli bot create --name "Name" --username name_bot` creates a managed bot.
+- `tgcli bot list` prints bots owned by the current account.
+- `tgcli bot token --username name_bot` prints a managed bot token; add `--revoke` to rotate it.
+- `tgcli bot remove --username name_bot --confirm` starts BotFather's delete flow.
+- `tgcli bot write --username name_bot --text /start --format json` sends text to a bot and returns recent messages with UI metadata.
+- `tgcli bot write --username name_bot --click "Button text"` or `--click 0,1 --message-id <id>` presses inline callback buttons.
 
 ## Session secrets
 
