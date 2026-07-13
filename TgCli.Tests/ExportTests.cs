@@ -1,6 +1,7 @@
 using Newtonsoft.Json.Linq;
 using System;
 using System.IO;
+using System.Linq;
 using System.Text.Json;
 using System.Threading.Tasks;
 using TdLib;
@@ -187,5 +188,49 @@ public sealed class ExportTests
         Assert.Equal(2, resolved.message_id);
         Assert.Equal(1254, resolved.file_id);
         Assert.Equal("remote-1", resolved.remote_id);
+    }
+
+    [Fact]
+    public void SessionSecretContainsOnlyAuthStateFiles()
+    {
+        var session = Path.Combine(Path.GetTempPath(), "tgcli-session-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(Path.Combine(session, "tdlib-db", "thumbnails"));
+        Directory.CreateDirectory(Path.Combine(session, "tdlib-files"));
+        Directory.CreateDirectory(Path.Combine(session, "app"));
+        File.WriteAllText(Path.Combine(session, "config.json"), """{"apiId":1,"apiHash":"hash"}""");
+        File.WriteAllText(Path.Combine(session, "tdlib-db", "td.binlog"), "auth-state");
+        File.WriteAllText(Path.Combine(session, "tdlib-db", "db.sqlite"), "message-cache");
+        File.WriteAllText(Path.Combine(session, "tdlib-db", "thumbnails", "1.webp"), "thumbnail");
+        File.WriteAllText(Path.Combine(session, "tdlib-files", "photo.jpg"), "image");
+        File.WriteAllText(Path.Combine(session, "attachment-index.jsonl"), "{}");
+        File.WriteAllText(Path.Combine(session, "tdlib.lock"), "123");
+
+        var secret = SessionSecret.Export(session);
+        var files = SessionSecret.Inspect(secret);
+
+        Assert.Equal(["config.json", "manifest.json", "tdlib-db/td.binlog"], files.Keys.OrderBy(x => x, StringComparer.Ordinal).ToArray());
+        Assert.Equal("""{"apiId":1,"apiHash":"hash"}""", System.Text.Encoding.UTF8.GetString(files["config.json"]));
+        Assert.Equal("auth-state", System.Text.Encoding.UTF8.GetString(files["tdlib-db/td.binlog"]));
+    }
+
+    [Fact]
+    public void SessionSecretImportRefusesToOverwriteWithoutForce()
+    {
+        var source = Path.Combine(Path.GetTempPath(), "tgcli-session-source-" + Guid.NewGuid().ToString("N"));
+        var target = Path.Combine(Path.GetTempPath(), "tgcli-session-target-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(Path.Combine(source, "tdlib-db"));
+        Directory.CreateDirectory(target);
+        File.WriteAllText(Path.Combine(source, "config.json"), """{"apiId":1,"apiHash":"hash"}""");
+        File.WriteAllText(Path.Combine(source, "tdlib-db", "td.binlog"), "auth-state");
+        File.WriteAllText(Path.Combine(target, "config.json"), "existing");
+        var secret = SessionSecret.Export(source);
+
+        Assert.Throws<System.ComponentModel.DataAnnotations.ValidationException>(() => SessionSecret.Import(secret, target, force: false));
+
+        SessionSecret.Import(secret, target, force: true);
+
+        Assert.Equal("""{"apiId":1,"apiHash":"hash"}""", File.ReadAllText(Path.Combine(target, "config.json")));
+        Assert.Equal("auth-state", File.ReadAllText(Path.Combine(target, "tdlib-db", "td.binlog")));
+        Assert.False(File.Exists(Path.Combine(target, "tdlib-db", "db.sqlite")));
     }
 }

@@ -20,6 +20,7 @@ internal static class Program
         app.Add<ChannelCommands>("channel");
         app.Add<LinkCommands>("link");
         app.Add<MessageCommands>("message");
+        app.Add<SessionCommands>("session");
 
         app.Run(args);
     }

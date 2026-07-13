@@ -1,5 +1,25 @@
 # Changelog
 
+## 5.1.0
+
+- Add `tgcli session export` to write a compact single-line Telegram authorization secret.
+- Add `tgcli session import` to restore that authorization state from stdin, with `--force` required before overwriting an existing session.
+- Keep session secrets minimal: only `config.json` and TDLib's `tdlib-db/td.binlog` are included; message history, media, images, thumbnails, downloads, exports, reports, attachment indexes, app binaries, SQLite cache databases, and lock files are excluded.
+
+Install:
+
+```bash
+sudo curl -L https://github.com/podkolzzzin/tgcli/releases/download/v5.1.0/tgcli-linux-x64 -o /usr/local/bin/tgcli && sudo chmod +x /usr/local/bin/tgcli
+```
+
+```powershell
+New-Item -ItemType Directory -Force "$env:ProgramFiles\tgcli" | Out-Null; Invoke-WebRequest "https://github.com/podkolzzzin/tgcli/releases/download/v5.1.0/tgcli-win-x64.exe" -OutFile "$env:ProgramFiles\tgcli\tgcli.exe"; [Environment]::SetEnvironmentVariable("Path", [Environment]::GetEnvironmentVariable("Path", "Machine") + ";$env:ProgramFiles\tgcli", "Machine")
+```
+
+```bash
+sudo curl -L https://github.com/podkolzzzin/tgcli/releases/download/v5.1.0/tgcli-osx-x64 -o /usr/local/bin/tgcli && sudo chmod +x /usr/local/bin/tgcli
+```
+
 ## 5.0.0
 
 - Fix channel `chat export --all-history` and `chat messages --all` pagination when TDLib returns short pages for channel-style message ids.

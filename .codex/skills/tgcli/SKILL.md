@@ -18,7 +18,8 @@ Core flow:
 7. For channels, inspect metrics with `tgcli channel metrics --chat-id <id> --format json` and comments/discussion mapping with `tgcli channel comments --chat-id <id> --post-id <short-id> --format jsonl`.
 8. Build links: `tgcli link message --chat-id <id> --message-id <message-id> --format json`.
 9. Inspect one message with files/links: `tgcli message get --chat-id <id> --message-id <message-id> --format json`.
-10. Download files by message when possible: `tgcli download --chat-id <id> --message-id <message-id> --output <path>`. Fallback: `tgcli download --type <type> --attachment-id <file-id-or-remote-id> --output <path>`.
+10. Export/import only Telegram authorization state with `tgcli session export > tgcli.session` and `tgcli session import < tgcli.session`.
+11. Download files by message when possible: `tgcli download --chat-id <id> --message-id <message-id> --output <path>`. Fallback: `tgcli download --type <type> --attachment-id <file-id-or-remote-id> --output <path>`.
 
 Message links:
 
@@ -44,6 +45,12 @@ Channel analytics:
 - `tgcli channel metrics --chat-id <id> --format jsonl|json|csv` emits per-post metrics, link domains, and engagement rate; JSON output includes aggregates and top posts by views.
 - `tgcli channel comments --chat-id <id> --post-id <short_message_id> --format jsonl|json` resolves the linked discussion thread and preserves `channel_post_id -> discussion_chat_id -> discussion_message_id`.
 - Add `--summary` to `channel comments` for per-post comment count, unique commenters, top commenters, first/last comment date, and inaccessible markers.
+
+Session secrets:
+
+- `tgcli session export` writes a compact single-line secret for the current Telegram authorization state.
+- `tgcli session import` reads that secret from stdin; add `--force` only when replacing an existing session directory.
+- The secret contains only `config.json` and `tdlib-db/td.binlog`. It does not contain message history, media, images, thumbnails, downloads, exports, reports, attachment indexes, app binaries, SQLite cache databases, or lock files.
 
 Service messages and stats:
 
