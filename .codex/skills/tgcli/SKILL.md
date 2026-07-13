@@ -1,11 +1,11 @@
 ---
 name: tgcli
-description: Use this project-scoped skill when Codex needs to inspect Telegram chats or messages with the local `tgcli` command-line tool, including login/session setup, chat lookup, message history, message search, attachment search, and file downloads.
+description: Use this project-scoped skill when Codex needs to inspect Telegram chats or messages with the local `tgcli` command-line tool, including login/session setup, chat lookup, message history, message search, bot management and interaction, attachment search, and file downloads.
 ---
 
 # tgcli
 
-Use `tgcli --help` or `<command> --help` if flags may have changed. Prefer v5 commands (`tgcli --version` => `5.x`) for the versioned rich export schema, channel-aware pagination, integrity manifests, channel metrics/comments, incremental caches, diagnostics, and conversation context.
+Use `tgcli --help` or `<command> --help` if flags may have changed. Prefer v6 commands (`tgcli --version` => `6.x`) for BotFather-backed bot management, bot chat interaction, the versioned rich export schema, channel-aware pagination, integrity manifests, channel metrics/comments, incremental caches, diagnostics, and conversation context.
 
 Core flow:
 
@@ -20,6 +20,7 @@ Core flow:
 9. Inspect one message with files/links: `tgcli message get --chat-id <id> --message-id <message-id> --format json`.
 10. Export/import only Telegram authorization state with `tgcli session export > tgcli.session` and `tgcli session import < tgcli.session`.
 11. Download files by message when possible: `tgcli download --chat-id <id> --message-id <message-id> --output <path>`. Fallback: `tgcli download --type <type> --attachment-id <file-id-or-remote-id> --output <path>`.
+12. Manage and interact with bots: `tgcli bot list`, `tgcli bot create --name "<name>" --username <unique_bot>`, `tgcli bot token --username <bot>`, `tgcli bot write --username <bot> --text /start --format json`, and `tgcli bot remove --username <bot> --confirm`.
 
 Message links:
 
@@ -45,6 +46,16 @@ Channel analytics:
 - `tgcli channel metrics --chat-id <id> --format jsonl|json|csv` emits per-post metrics, link domains, and engagement rate; JSON output includes aggregates and top posts by views.
 - `tgcli channel comments --chat-id <id> --post-id <short_message_id> --format jsonl|json` resolves the linked discussion thread and preserves `channel_post_id -> discussion_chat_id -> discussion_message_id`.
 - Add `--summary` to `channel comments` for per-post comment count, unique commenters, top commenters, first/last comment date, and inaccessible markers.
+
+Bot management and interaction:
+
+- `tgcli bot create --name "<display name>" --username <unique_bot> --format json` creates a BotFather-managed bot and prints the BotFather response. Treat any token in output as a secret.
+- `tgcli bot list --format json|jsonl|tsv|plain` lists bots owned by the current account.
+- `tgcli bot token --username <bot> --format plain` retrieves the bot token via BotFather; add `--revoke` to rotate it. Redirect or redact token output unless the user explicitly needs it.
+- `tgcli bot remove --username <bot> --confirm --format json` executes BotFather's delete flow. Use only when deletion is explicitly requested.
+- `tgcli bot write --username <bot> --text "<message>" --format json` sends a message to a bot and returns recent messages with UI metadata.
+- `tgcli bot write --username <bot> --click "<button text>" --message-id <id> --format json` presses an inline callback button. Use `--click row,column` such as `--click 0,1` when button text is ambiguous. If `--message-id` is omitted, tgcli uses the latest recent inline-keyboard message.
+- Bot UI output includes `ui.type`, button `row`/`column`, `text`, and button type. Only inline callback buttons can be pressed by tgcli.
 
 Session secrets:
 
