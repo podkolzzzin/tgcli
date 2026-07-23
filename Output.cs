@@ -482,7 +482,7 @@ internal static class Output
                 original_message_id = row.OriginalMessageId
             }
             : new
-        {
+            {
                 chat_id = row.ChatId,
                 message_id = row.MessageId,
                 date = row.Date,

@@ -800,6 +800,7 @@ public sealed class ChatCommands
     /// Print messages from a chat.
     /// </summary>
     /// <param name="chatId">Chat id from tgcli chat list/search/resolve.</param>
+    /// <param name="topicId">Forum topic id. Use tgcli forum topics to list ids.</param>
     /// <param name="limit">Maximum messages for a single page.</param>
     /// <param name="fromMessageId">Start before this message id. Use the oldest printed id as the next page cursor.</param>
     /// <param name="offset">TDLib history offset, usually 0.</param>
@@ -811,6 +812,7 @@ public sealed class ChatCommands
     /// <param name="session">Session directory. Defaults to ~/.local/share/tgcli.</param>
     public async Task Messages(
         long chatId,
+        int topicId = 0,
         int limit = 30,
         long fromMessageId = 0,
         int offset = 0,
@@ -821,20 +823,53 @@ public sealed class ChatCommands
         string? kind = null,
         string format = "tsv",
         string schema = "simple",
+        int requestTimeout = 60,
         int lockTimeout = 30,
         bool noWait = false,
-        string? session = null)
+        string? session = null,
+        CancellationToken cancellationToken = default)
     {
         await using var tg = await TelegramSession.CreateReadyAsync(session, lockTimeout, noWait);
-        var history = all ? await ChatHistory.FetchAsync(tg, chatId, all: true, local, maxPages, followMigrations: false) : null;
+        if (topicId < 0)
+        {
+            throw new ArgumentException("--topic-id must be zero or greater.", nameof(topicId));
+        }
+        if (topicId > 0 && local)
+        {
+            throw new ArgumentException("--local is not supported with --topic-id.", nameof(local));
+        }
+
+        var topicHistory = topicId > 0
+            ? await ForumTopicHistory.FetchAsync(
+                tg,
+                chatId,
+                topicId,
+                fromMessageId,
+                offset,
+                limit,
+                all,
+                maxPages,
+                requestTimeout,
+                cancellationToken)
+            : null;
+        var history = topicId == 0 && all
+            ? await ChatHistory.FetchAsync(tg, chatId, all: true, local, maxPages, followMigrations: false)
+            : null;
         if (history is { Complete: false })
         {
             throw new InvalidOperationException("Incomplete result: reached --max-pages before history ended.");
         }
+        if (all && topicHistory is { Complete: false })
+        {
+            throw new InvalidOperationException(
+                $"Incomplete forum topic result: {topicHistory.TerminationReason} after {topicHistory.PagesFetched} pages.");
+        }
 
-        IEnumerable<TdApi.Message> messages = all
-            ? history!.Messages.Select(x => x.Message)
-            : (await tg.Client.GetChatHistoryAsync(chatId, fromMessageId, offset, ClampLimit(limit, 100), local)).Messages_;
+        IEnumerable<TdApi.Message> messages = topicHistory is not null
+            ? topicHistory.Messages
+            : all
+                ? history!.Messages.Select(x => x.Message)
+                : (await tg.Client.GetChatHistoryAsync(chatId, fromMessageId, offset, ClampLimit(limit, 100), local)).Messages_;
 
         var filtered = FilterMessages(messages, serviceOnly, kind).ToArray();
         var parsedFormat = Output.ParseFormat(format);
@@ -845,7 +880,7 @@ public sealed class ChatCommands
                 throw new ArgumentException("--schema rich requires --format jsonl or --format json.", nameof(schema));
             }
 
-            var exported = all
+            var exported = history is not null
                 ? history!.Messages.Where(x => filtered.Any(message => message.ChatId == x.Message.ChatId && message.Id == x.Message.Id))
                 : filtered.Select(x => new ExportedMessage(x, x.ChatId, x.ChatId, x.Id));
             await Output.WriteExportedMessagesAsync(Console.Out, tg, exported, parsedFormat, includeLinks: true);
@@ -889,6 +924,7 @@ public sealed class ChatCommands
     /// Search messages inside a chat.
     /// </summary>
     /// <param name="chatId">Chat id from tgcli chat list/search/resolve.</param>
+    /// <param name="topicId">Forum topic id. Use tgcli forum topics to list ids.</param>
     /// <param name="query">Search text. Use an empty string with --type to search attachments.</param>
     /// <param name="queries">File with one search query per line.</param>
     /// <param name="type">Filter: all, voice, attach/document, audio, video, photo, animation, video-note.</param>
@@ -901,6 +937,7 @@ public sealed class ChatCommands
     /// <param name="session">Session directory. Defaults to ~/.local/share/tgcli.</param>
     public async Task Search(
         long chatId,
+        int topicId = 0,
         string query = "",
         string? queries = null,
         string type = "all",
@@ -912,24 +949,44 @@ public sealed class ChatCommands
         string format = "tsv",
         bool serviceOnly = false,
         string? kind = null,
-        string? session = null)
+        int requestTimeout = 60,
+        int lockTimeout = 30,
+        bool noWait = false,
+        string? session = null,
+        CancellationToken cancellationToken = default)
     {
-        await using var tg = await TelegramSession.CreateReadyAsync(session);
+        await using var tg = await TelegramSession.CreateReadyAsync(session, lockTimeout, noWait);
+        if (topicId < 0)
+        {
+            throw new ArgumentException("--topic-id must be zero or greater.", nameof(topicId));
+        }
+        ForumTopicHistory.ValidateRequestTimeout(requestTimeout);
+
         var searchQueries = LoadQueries(query, queries);
 
         foreach (var searchQuery in searchQueries)
         {
             IEnumerable<TdApi.Message> messages = all
-                ? await FetchSearchAsync(tg, chatId, searchQuery, type, fromMessageId, maxPages)
-                : (await tg.Client.SearchChatMessagesAsync(
+                ? await FetchSearchAsync(
+                    tg,
                     chatId,
-                    topicId: null!,
+                    topicId,
                     searchQuery,
-                    senderId: null!,
+                    type,
                     fromMessageId,
-                    offset,
-                    ClampLimit(limit, 100),
-                    AttachmentKinds.ToSearchFilter(type))).Messages;
+                    maxPages,
+                    requestTimeout,
+                    cancellationToken)
+                : (await tg.Client.SearchChatMessagesAsync(
+                        chatId,
+                        CreateMessageTopic(topicId),
+                        searchQuery,
+                        senderId: null!,
+                        fromMessageId,
+                        offset,
+                        ClampLimit(limit, 100),
+                        AttachmentKinds.ToSearchFilter(type))
+                    .WaitAsync(TimeSpan.FromSeconds(requestTimeout), cancellationToken)).Messages;
 
             await Output.PrintMessagesAsync(tg, FilterMessages(messages, serviceOnly, kind), format, searchQuery);
         }
@@ -1108,26 +1165,67 @@ public sealed class ChatCommands
     /// <summary>
     /// Print chat boundary and aggregate statistics.
     /// </summary>
-    public async Task Stats(long chatId, int maxPages = 1000, bool local = false, string format = "json", string? session = null)
+    public async Task Stats(
+        long chatId,
+        int topicId = 0,
+        string type = "all",
+        int maxPages = 1000,
+        bool local = false,
+        string format = "json",
+        int requestTimeout = 60,
+        int lockTimeout = 30,
+        bool noWait = false,
+        string? session = null,
+        CancellationToken cancellationToken = default)
     {
-        await using var tg = await TelegramSession.CreateReadyAsync(session);
-        var history = await ChatHistory.FetchAsync(tg, chatId, all: true, local, maxPages, followMigrations: true);
-        var messages = history.Messages.Select(x => x.Message).ToArray();
-        var files = messages.SelectMany(MessageFiles.GetAllFiles).ToArray();
+        await using var tg = await TelegramSession.CreateReadyAsync(session, lockTimeout, noWait);
+        if (topicId < 0)
+        {
+            throw new ArgumentException("--topic-id must be zero or greater.", nameof(topicId));
+        }
+        if (topicId > 0 && local)
+        {
+            throw new ArgumentException("--local is not supported with --topic-id.", nameof(local));
+        }
+
+        _ = AttachmentKinds.Parse(type);
+        var topicHistory = topicId > 0
+            ? await ForumTopicHistory.FetchAsync(
+                tg,
+                chatId,
+                topicId,
+                fromMessageId: 0,
+                offset: 0,
+                limit: 100,
+                all: true,
+                maxPages,
+                requestTimeout,
+                cancellationToken)
+            : null;
+        var history = topicId == 0
+            ? await ChatHistory.FetchAsync(tg, chatId, all: true, local, maxPages, followMigrations: true)
+            : null;
+        var messages = topicHistory is not null
+            ? topicHistory.Messages.ToArray()
+            : history!.Messages.Select(x => x.Message).ToArray();
+        var complete = topicHistory?.Complete ?? history!.Complete;
+        var terminationReason = topicHistory?.TerminationReason ?? history!.TerminationReason;
+        var pagesFetched = topicHistory?.PagesFetched ?? history!.PagesFetched;
+        var attachments = AttachmentStatistics.Build(messages, type);
         var payload = new JObject
         {
             ["chat_id"] = chatId,
+            ["topic_id"] = topicId == 0 ? JValue.CreateNull() : topicId,
             ["count"] = messages.Length,
-            ["count_kind"] = history.Complete ? "exact" : "estimated",
+            ["count_kind"] = complete ? "exact" : "estimated",
+            ["complete"] = complete,
+            ["termination_reason"] = terminationReason,
+            ["pages_fetched"] = pagesFetched,
             ["first_timestamp"] = messages.Length == 0 ? JValue.CreateNull() : DateTimeOffset.FromUnixTimeSeconds(messages.Min(x => x.Date)).ToString("O"),
             ["last_timestamp"] = messages.Length == 0 ? JValue.CreateNull() : DateTimeOffset.FromUnixTimeSeconds(messages.Max(x => x.Date)).ToString("O"),
             ["participant_count"] = await TryGetParticipantCountAsync(tg, chatId),
-            ["attachments"] = new JObject
-            {
-                ["count"] = files.Length,
-                ["by_kind"] = JObject.FromObject(files.GroupBy(x => x.Kind).ToDictionary(group => group.Key, group => group.Count()))
-            },
-            ["migrations"] = new JArray(history.SourceChats)
+            ["attachments"] = attachments,
+            ["migrations"] = new JArray(history?.SourceChats ?? [chatId])
         };
 
         Console.WriteLine(format.Trim().ToLowerInvariant() switch
@@ -1174,10 +1272,13 @@ public sealed class ChatCommands
     private static async Task<List<TdApi.Message>> FetchSearchAsync(
         TelegramSession tg,
         long chatId,
+        int topicId,
         string query,
         string type,
         long fromMessageId,
-        int maxPages)
+        int maxPages,
+        int requestTimeout,
+        CancellationToken cancellationToken)
     {
         var messages = new List<TdApi.Message>();
         var seen = new HashSet<long>();
@@ -1185,24 +1286,37 @@ public sealed class ChatCommands
 
         for (var page = 0; page < Math.Max(1, maxPages); page++)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             var result = await tg.Client.SearchChatMessagesAsync(
-                chatId,
-                topicId: null!,
-                query,
-                senderId: null!,
-                cursor,
-                offset: 0,
-                limit: 100,
-                AttachmentKinds.ToSearchFilter(type));
+                    chatId,
+                    CreateMessageTopic(topicId),
+                    query,
+                    senderId: null!,
+                    cursor,
+                    offset: 0,
+                    limit: 100,
+                    AttachmentKinds.ToSearchFilter(type))
+                .WaitAsync(TimeSpan.FromSeconds(requestTimeout), cancellationToken);
 
             var pageMessages = result.Messages.Where(x => seen.Add(x.Id)).ToArray();
             if (pageMessages.Length == 0)
             {
+                if (result.Messages.Length > 0)
+                {
+                    throw new InvalidOperationException("Search pagination cursor did not advance.");
+                }
+
                 break;
             }
 
             messages.AddRange(pageMessages);
-            cursor = pageMessages.Min(x => x.Id);
+            var nextCursor = pageMessages.Min(x => x.Id);
+            if (cursor != 0 && nextCursor >= cursor)
+            {
+                throw new InvalidOperationException("Search pagination cursor did not advance.");
+            }
+
+            cursor = nextCursor;
 
             if (result.Messages.Length < 100)
             {
@@ -1211,6 +1325,13 @@ public sealed class ChatCommands
         }
 
         return messages;
+    }
+
+    private static TdApi.MessageTopic CreateMessageTopic(int topicId)
+    {
+        return topicId > 0
+            ? new TdApi.MessageTopic.MessageTopicForum { ForumTopicId = topicId }
+            : null!;
     }
 
     private static string[] LoadQueries(string query, string? queries)

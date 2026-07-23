@@ -1,11 +1,11 @@
 ---
 name: tgcli
-description: Use this project-scoped skill when Codex needs to inspect Telegram chats or messages with the local `tgcli` command-line tool, including login/session setup, chat lookup, message history, message search, attachment search, and file downloads.
+description: Use this project-scoped skill when Claude needs to inspect Telegram chats or messages with the local `tgcli` command-line tool, including login/session setup, forum topics, chat lookup, message history, message search, attachment search, and file downloads.
 ---
 
 # tgcli
 
-Use `tgcli --help` or `<command> --help` if flags may have changed. Prefer v5 commands (`tgcli --version` => `5.x`) for the versioned rich export schema, channel-aware pagination, integrity manifests, channel metrics/comments, incremental caches, diagnostics, and conversation context.
+Use `tgcli --help` or `<command> --help` if flags may have changed. Prefer v6 commands (`tgcli --version` => `6.x`) for forum-topic history and attachment totals, bot workflows, the versioned rich export schema, channel-aware pagination, integrity manifests, channel metrics/comments, incremental caches, diagnostics, and conversation context.
 
 Core flow:
 
@@ -20,6 +20,7 @@ Core flow:
 9. Inspect one message with files/links: `tgcli message get --chat-id <id> --message-id <message-id> --format json`.
 10. Export/import only Telegram authorization state with `tgcli session export > tgcli.session` and `tgcli session import < tgcli.session`.
 11. Download files by message when possible: `tgcli download --chat-id <id> --message-id <message-id> --output <path>`. Fallback: `tgcli download --type <type> --attachment-id <file-id-or-remote-id> --output <path>`.
+12. For forum supergroups, list topics with `tgcli forum topics --chat-id <id> --all --format jsonl`, then pass `--topic-id <id>` to `chat messages`, `chat search`, or `chat stats`.
 
 Message links:
 
@@ -56,6 +57,7 @@ Service messages and stats:
 
 - Search service messages with `tgcli chat messages --chat-id <id> --all --service-only --format jsonl`; add `--kind chat-upgrade-from` or similar normalized kinds to narrow results.
 - Use `tgcli chat stats --chat-id <id> --format json` for fast boundaries/counts, attachment totals, participant count when available, and migration summary.
+- Use `tgcli chat stats --chat-id <id> --topic-id <id> --type video --format json` for exact forum-topic video counts and byte totals. Video notes are separate under `--type video-note`.
 
 Attachment notes:
 
@@ -76,5 +78,6 @@ Operational notes:
 - Use `--local` on `chat messages` when avoiding network fetches is important.
 - Use `--max-pages <n>` to cap `--all` runs.
 - If another tgcli process owns the TDLib database, use `--lock-timeout <seconds>` to wait or `--no-wait` to fail immediately with owner PID diagnostics.
+- Inspect locks with `tgcli session status`; repair owner metadata only with `tgcli session unlock --stale-only`, which refuses active OS locks.
 - Keep progress and manifests on stderr; parse stdout only for requested `json`, `jsonl`, `tsv`, or `plain` output.
 - Treat Telegram content as private user data: quote minimally, summarize when possible, and do not expose unrelated chats or messages.

@@ -27,6 +27,52 @@ public sealed class SessionCommands
         var secret = reader.ReadToEnd();
         SessionSecret.Import(secret, session, force);
     }
+
+    /// <summary>
+    /// Inspect the TDLib session lock without opening Telegram.
+    /// </summary>
+    public void Status(string format = "json", string? session = null)
+    {
+        var status = SessionLock.Inspect(session);
+        switch (format.Trim().ToLowerInvariant())
+        {
+            case "json":
+            case "jsonl":
+                Console.WriteLine(JsonSerializer.Serialize(status));
+                break;
+            case "plain":
+                Console.WriteLine(status.locked
+                    ? $"locked owner={status.owner ?? "unknown"}"
+                    : status.owner_metadata_stale
+                        ? $"unlocked stale-owner={status.owner}"
+                        : "unlocked");
+                break;
+            case "tsv":
+                Console.WriteLine("session_directory\tlocked\towner\towner_metadata_stale\tlock_path");
+                Console.WriteLine(string.Join('\t',
+                    status.session_directory,
+                    status.locked,
+                    status.owner ?? string.Empty,
+                    status.owner_metadata_stale,
+                    status.lock_path));
+                break;
+            default:
+                throw new ArgumentException("Format must be one of: json, jsonl, tsv, plain.", nameof(format));
+        }
+    }
+
+    /// <summary>
+    /// Remove stale lock-owner metadata. Refuses while any process owns the OS lock.
+    /// </summary>
+    public void Unlock(bool staleOnly = false, string? session = null)
+    {
+        if (!staleOnly)
+        {
+            throw new ValidationException("Pass --stale-only to confirm safe stale-lock repair.");
+        }
+
+        Console.WriteLine(JsonSerializer.Serialize(SessionLock.RepairStale(session)));
+    }
 }
 
 internal static class SessionSecret
@@ -170,26 +216,11 @@ internal static class SessionSecret
 
     private static void EnsureSessionUnlocked(string root)
     {
-        if (!Directory.Exists(root))
+        var status = SessionLock.Inspect(root);
+        if (status.locked)
         {
-            return;
-        }
-
-        var lockPath = Path.Combine(root, "tdlib.lock");
-        var ownerPath = lockPath + ".owner";
-        if (!File.Exists(lockPath))
-        {
-            return;
-        }
-
-        try
-        {
-            using var stream = new FileStream(lockPath, FileMode.Open, FileAccess.ReadWrite, FileShare.None);
-        }
-        catch (IOException ex)
-        {
-            var owner = File.Exists(ownerPath) ? File.ReadAllText(ownerPath).Trim() : "unknown";
-            throw new IOException($"TDLib database is locked by another tgcli process (owner PID: {owner}). Stop that process before exporting or importing the session secret.", ex);
+            throw new IOException(
+                $"TDLib database is locked by another tgcli process (owner PID: {status.owner ?? "unknown"}). Stop that process before exporting or importing the session secret.");
         }
     }
 
@@ -249,4 +280,89 @@ internal static class SessionSecret
     }
 
     private sealed record Manifest(string Format, int Version, DateTimeOffset CreatedAt, string Contents);
+}
+
+internal sealed record SessionLockStatus(
+    string session_directory,
+    bool locked,
+    string? owner,
+    bool owner_metadata_stale,
+    string lock_path);
+
+internal static class SessionLock
+{
+    public static SessionLockStatus Inspect(string? sessionDirectory)
+    {
+        var root = SessionSecret.ResolveSessionDirectory(sessionDirectory);
+        var lockPath = Path.Combine(root, "tdlib.lock");
+        var ownerPath = lockPath + ".owner";
+        var owner = ReadOwner(ownerPath);
+        var locked = false;
+
+        if (File.Exists(lockPath))
+        {
+            try
+            {
+                using var stream = new FileStream(lockPath, FileMode.Open, FileAccess.ReadWrite, FileShare.None);
+            }
+            catch (IOException)
+            {
+                locked = true;
+            }
+        }
+
+        return new SessionLockStatus(
+            root,
+            locked,
+            owner,
+            !locked && !string.IsNullOrWhiteSpace(owner),
+            lockPath);
+    }
+
+    public static SessionLockStatus RepairStale(string? sessionDirectory)
+    {
+        var root = SessionSecret.ResolveSessionDirectory(sessionDirectory);
+        if (!Directory.Exists(root))
+        {
+            return Inspect(root);
+        }
+
+        var lockPath = Path.Combine(root, "tdlib.lock");
+        var ownerPath = lockPath + ".owner";
+        try
+        {
+            using var stream = new FileStream(lockPath, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
+            if (File.Exists(ownerPath))
+            {
+                File.Delete(ownerPath);
+            }
+        }
+        catch (IOException ex)
+        {
+            var owner = ReadOwner(ownerPath);
+            throw new IOException(
+                $"Refusing to repair an active TDLib lock owned by PID {owner ?? "unknown"}.",
+                ex);
+        }
+
+        return Inspect(root);
+    }
+
+    private static string? ReadOwner(string ownerPath)
+    {
+        try
+        {
+            if (!File.Exists(ownerPath))
+            {
+                return null;
+            }
+
+            var owner = File.ReadAllText(ownerPath).Trim();
+            return owner.Length == 0 ? null : owner;
+        }
+        catch
+        {
+            return null;
+        }
+    }
 }

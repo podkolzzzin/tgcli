@@ -7,19 +7,19 @@ Small command-line tool for reading Telegram chats with TDLib.
 Linux:
 
 ```bash
-sudo curl -L https://github.com/podkolzzzin/tgcli/releases/download/v6.0.0/tgcli-linux-x64 -o /usr/local/bin/tgcli && sudo chmod +x /usr/local/bin/tgcli
+sudo curl -L https://github.com/podkolzzzin/tgcli/releases/download/v6.1.0/tgcli-linux-x64 -o /usr/local/bin/tgcli && sudo chmod +x /usr/local/bin/tgcli
 ```
 
 Windows PowerShell, as Administrator:
 
 ```powershell
-New-Item -ItemType Directory -Force "$env:ProgramFiles\tgcli" | Out-Null; Invoke-WebRequest "https://github.com/podkolzzzin/tgcli/releases/download/v6.0.0/tgcli-win-x64.exe" -OutFile "$env:ProgramFiles\tgcli\tgcli.exe"; [Environment]::SetEnvironmentVariable("Path", [Environment]::GetEnvironmentVariable("Path", "Machine") + ";$env:ProgramFiles\tgcli", "Machine")
+New-Item -ItemType Directory -Force "$env:ProgramFiles\tgcli" | Out-Null; Invoke-WebRequest "https://github.com/podkolzzzin/tgcli/releases/download/v6.1.0/tgcli-win-x64.exe" -OutFile "$env:ProgramFiles\tgcli\tgcli.exe"; [Environment]::SetEnvironmentVariable("Path", [Environment]::GetEnvironmentVariable("Path", "Machine") + ";$env:ProgramFiles\tgcli", "Machine")
 ```
 
 macOS:
 
 ```bash
-sudo curl -L https://github.com/podkolzzzin/tgcli/releases/download/v6.0.0/tgcli-osx-x64 -o /usr/local/bin/tgcli && sudo chmod +x /usr/local/bin/tgcli
+sudo curl -L https://github.com/podkolzzzin/tgcli/releases/download/v6.1.0/tgcli-osx-x64 -o /usr/local/bin/tgcli && sudo chmod +x /usr/local/bin/tgcli
 ```
 
 Then open a new terminal and run:
@@ -58,6 +58,10 @@ You only need to login once. The local Telegram session is stored on your machin
 tgcli chat list
 tgcli search "some chat"
 tgcli chat messages --chat-id 123456789
+tgcli forum topics --chat-id 123456789 --all
+tgcli chat messages --chat-id 123456789 --topic-id 10 --all
+tgcli chat search --chat-id 123456789 --topic-id 10 --type video --all
+tgcli chat stats --chat-id 123456789 --topic-id 10 --type video
 tgcli chat export --chat-id 123456789 --format md --output chat.md
 tgcli chat export --chat-id 123456789 --all-history --format jsonl --output chat.jsonl --fail-incomplete
 tgcli channel metrics --chat-id 123456789 --format json
@@ -86,6 +90,19 @@ JSONL exports use the versioned `tgcli.message/5.0` schema. Each record includes
 Use `--fields chat_id,message_id,text` for a stable projection. Use `--since-message-id`, `--since-date`, or `--resume-token` to limit a later export. `--resume` deduplicates an existing JSONL cache; `--incremental` also emits deletion tombstones after a complete refresh. `--transcribe-command <executable>` passes each downloaded voice/video-note path as the final argument and labels stdout as generated transcription text.
 
 `channel metrics` emits one row per post with views, forwards, replies, reactions, paid reactions, link domains, and engagement rate. `channel comments` resolves Telegram discussion threads and includes `channel_post_id`, `discussion_chat_id`, and `discussion_message_id` for each exported row.
+
+## Forum topics and attachment sizes
+
+List a supergroup's forum topics, then use the returned `topic_id` with message, search, and stats commands:
+
+```bash
+tgcli forum topics --chat-id -1001234567890 --all --format jsonl
+tgcli chat messages --chat-id -1001234567890 --topic-id 10 --all --format jsonl
+tgcli chat search --chat-id -1001234567890 --topic-id 10 --type video --all --format jsonl
+tgcli chat stats --chat-id -1001234567890 --topic-id 10 --type video --format json
+```
+
+Topic statistics include exact/estimated completeness, termination reason, pages fetched, attachment count, known/unknown size counts, total bytes, and unique-file totals. `--type video` excludes video notes; use `--type video-note` to count round video messages separately. Topic requests have a bounded `--request-timeout`, and pagination fails clearly if its cursor stops advancing.
 
 ## Bot management
 
@@ -130,5 +147,7 @@ The secret contains only `config.json` and TDLib's `tdlib-db/td.binlog` authoriz
 Keep your session directory private. It contains Telegram login data.
 
 Session-backed commands use a lock file in the session directory, normally `~/.local/share/tgcli/tdlib.lock`. If another process owns the TDLib database, use `--lock-timeout <seconds>` to wait or `--no-wait` to fail immediately.
+
+Use `tgcli session status` to inspect a lock without opening Telegram. `tgcli session unlock --stale-only` removes stale owner metadata only when the operating-system lock is free; it refuses to override an active process. Failed initialization and readiness paths now dispose their sessions, TDLib shutdown is bounded, and normal shutdown removes its owner metadata.
 
 This project is unofficial and is not affiliated with Telegram.

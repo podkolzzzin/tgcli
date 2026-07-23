@@ -19,6 +19,7 @@ internal static class Program
         app.Add<ChatCommands>("chat");
         app.Add<ChannelCommands>("channel");
         app.Add<BotCommands>("bot");
+        app.Add<ForumCommands>("forum");
         app.Add<LinkCommands>("link");
         app.Add<MessageCommands>("message");
         app.Add<SessionCommands>("session");

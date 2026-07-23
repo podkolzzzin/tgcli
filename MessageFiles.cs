@@ -19,6 +19,17 @@ internal sealed record MessageFile(
 
 internal static class MessageFiles
 {
+    public static long? GetEffectiveSize(MessageFile file)
+    {
+        var size = file.Size.GetValueOrDefault();
+        if (size <= 0)
+        {
+            size = file.File.ExpectedSize;
+        }
+
+        return size > 0 ? size : null;
+    }
+
     public static MessageFile? GetPrimaryAttachment(TdApi.MessageContent? content, string? requestedType = null)
     {
         var requestedKind = string.IsNullOrWhiteSpace(requestedType) ? AttachmentKind.File : AttachmentKinds.Parse(requestedType);

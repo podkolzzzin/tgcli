@@ -1,5 +1,29 @@
 # Changelog
 
+## 6.1.0
+
+- Add `tgcli forum topics` to list forum topic names and stable topic ids.
+- Add `--topic-id` to `chat messages` and `chat search`.
+- Add topic-aware `chat stats --type <kind>` with attachment byte totals, known/unknown size counts, unique-file totals, pagination evidence, and explicit completeness.
+- Add bounded forum request timeouts and cursor-stall protection so topic history cannot hang indefinitely or silently loop.
+- Fix session lock leaks when TDLib initialization or authorization readiness fails, bound TDLib disposal, and remove owned lock metadata after normal shutdown.
+- Add `tgcli session status` and safe `tgcli session unlock --stale-only`; active operating-system locks are never overridden.
+- Update the TDLib application version reported by tgcli to `6.1.0`.
+
+Install:
+
+```bash
+sudo curl -L https://github.com/podkolzzzin/tgcli/releases/download/v6.1.0/tgcli-linux-x64 -o /usr/local/bin/tgcli && sudo chmod +x /usr/local/bin/tgcli
+```
+
+```powershell
+New-Item -ItemType Directory -Force "$env:ProgramFiles\tgcli" | Out-Null; Invoke-WebRequest "https://github.com/podkolzzzin/tgcli/releases/download/v6.1.0/tgcli-win-x64.exe" -OutFile "$env:ProgramFiles\tgcli\tgcli.exe"; [Environment]::SetEnvironmentVariable("Path", [Environment]::GetEnvironmentVariable("Path", "Machine") + ";$env:ProgramFiles\tgcli", "Machine")
+```
+
+```bash
+sudo curl -L https://github.com/podkolzzzin/tgcli/releases/download/v6.1.0/tgcli-osx-x64 -o /usr/local/bin/tgcli && sudo chmod +x /usr/local/bin/tgcli
+```
+
 ## 6.0.0
 
 - Add `tgcli bot create`, `tgcli bot remove`, `tgcli bot list`, and `tgcli bot token` for BotFather-backed managed bot workflows.
