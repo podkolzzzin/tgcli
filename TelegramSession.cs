@@ -9,6 +9,7 @@ internal sealed class TelegramSession : IAsyncDisposable
 {
     private readonly SessionConfig _config;
     private FileStream? _lockStream;
+    private string? _lockOwnerPath;
     private TdApi.AuthorizationState? _authorizationState;
     private TaskCompletionSource<TdApi.AuthorizationState> _authorizationChanged = NewAuthorizationChangedSource();
 
@@ -30,24 +31,53 @@ internal sealed class TelegramSession : IAsyncDisposable
         config.ApplyOverrides(apiId, apiHash);
         config.Validate();
         config.EnsureDirectories();
-        var lockStream = await AcquireLockAsync(config, TimeSpan.FromSeconds(noWait ? 0 : Math.Max(0, lockTimeout)));
-
-        if (saveConfig)
+        var acquiredLock = await AcquireLockAsync(config, TimeSpan.FromSeconds(noWait ? 0 : Math.Max(0, lockTimeout)));
+        TelegramSession? session = null;
+        try
         {
-            config.Save();
-        }
+            if (saveConfig)
+            {
+                config.Save();
+            }
 
-        DisableTdLibLogging();
-        var session = new TelegramSession(new TdClient(), config) { _lockStream = lockStream };
-        await session.InitializeAsync();
-        return session;
+            DisableTdLibLogging();
+            session = new TelegramSession(new TdClient(), config)
+            {
+                _lockStream = acquiredLock.Stream,
+                _lockOwnerPath = acquiredLock.OwnerPath
+            };
+            await session.InitializeAsync();
+            return session;
+        }
+        catch
+        {
+            if (session is not null)
+            {
+                await session.DisposeAsync();
+            }
+            else
+            {
+                await acquiredLock.Stream.DisposeAsync();
+                DeleteOwnedLockMetadata(acquiredLock.OwnerPath);
+            }
+
+            throw;
+        }
     }
 
     public static async Task<TelegramSession> CreateReadyAsync(string? sessionDirectory, int lockTimeout = 30, bool noWait = false)
     {
         var session = await CreateAsync(sessionDirectory, apiId: 0, apiHash: null, saveConfig: false, lockTimeout, noWait);
-        await session.EnsureReadyAsync();
-        return session;
+        try
+        {
+            await session.EnsureReadyAsync();
+            return session;
+        }
+        catch
+        {
+            await session.DisposeAsync();
+            throw;
+        }
     }
 
     public async Task LoginAsync(string? phone)
@@ -100,11 +130,11 @@ internal sealed class TelegramSession : IAsyncDisposable
                     break;
 
                 case TdApi.AuthorizationState.AuthorizationStateWaitPremiumPurchase:
-                throw new ValidationException("Telegram requires Premium purchase for this login; tgcli can't complete that flow.");
+                    throw new ValidationException("Telegram requires Premium purchase for this login; tgcli can't complete that flow.");
 
                 case TdApi.AuthorizationState.AuthorizationStateClosing:
                 case TdApi.AuthorizationState.AuthorizationStateClosed:
-                throw new ValidationException("TDLib session is closing or closed.");
+                    throw new ValidationException("TDLib session is closing or closed.");
 
                 default:
                     await WaitForAuthorizationChangeAsync(state);
@@ -136,7 +166,13 @@ internal sealed class TelegramSession : IAsyncDisposable
                 throw new ValidationException("Telegram session is not authorized. Run `tgcli login` first.");
             }
 
-            await WaitForAuthorizationChangeAsync(state);
+            var remaining = deadline - DateTimeOffset.UtcNow;
+            if (remaining <= TimeSpan.Zero)
+            {
+                break;
+            }
+
+            await WaitForAuthorizationChangeAsync(state, remaining);
         }
 
         throw new TimeoutException("Timed out while waiting for TDLib authorization state.");
@@ -145,8 +181,26 @@ internal sealed class TelegramSession : IAsyncDisposable
     public async ValueTask DisposeAsync()
     {
         Client.UpdateReceived -= OnUpdateReceived;
-        await Task.Run(Client.Dispose);
-        await (_lockStream?.DisposeAsync() ?? ValueTask.CompletedTask);
+        try
+        {
+            var disposeTask = Task.Run(Client.Dispose);
+            if (await Task.WhenAny(disposeTask, Task.Delay(TimeSpan.FromSeconds(10))) == disposeTask)
+            {
+                await disposeTask;
+            }
+            else
+            {
+                Console.Error.WriteLine("Warning: TDLib shutdown exceeded 10 seconds; continuing process shutdown.");
+            }
+        }
+        finally
+        {
+            await (_lockStream?.DisposeAsync() ?? ValueTask.CompletedTask);
+            if (_lockOwnerPath is not null)
+            {
+                DeleteOwnedLockMetadata(_lockOwnerPath);
+            }
+        }
     }
 
     private async Task InitializeAsync()
@@ -183,11 +237,11 @@ internal sealed class TelegramSession : IAsyncDisposable
                 systemLanguageCode: "en",
                 deviceModel: Environment.MachineName,
                 systemVersion: RuntimeInformation.OSDescription,
-                applicationVersion: "6.0.0");
+                applicationVersion: "6.1.0");
         }
     }
 
-    private static async Task<FileStream> AcquireLockAsync(SessionConfig config, TimeSpan timeout)
+    private static async Task<AcquiredSessionLock> AcquireLockAsync(SessionConfig config, TimeSpan timeout)
     {
         var lockPath = Path.Combine(config.RootDirectory, "tdlib.lock");
         var ownerPath = lockPath + ".owner";
@@ -205,7 +259,7 @@ internal sealed class TelegramSession : IAsyncDisposable
                 await writer.FlushAsync();
                 stream.Position = 0;
                 File.WriteAllText(ownerPath, Environment.ProcessId.ToString(System.Globalization.CultureInfo.InvariantCulture));
-                return stream;
+                return new AcquiredSessionLock(stream, ownerPath);
             }
             catch (IOException ex)
             {
@@ -221,7 +275,27 @@ internal sealed class TelegramSession : IAsyncDisposable
         }
     }
 
-    private async Task WaitForAuthorizationChangeAsync(TdApi.AuthorizationState previousState)
+    private static void DeleteOwnedLockMetadata(string ownerPath)
+    {
+        try
+        {
+            if (File.Exists(ownerPath)
+                && File.ReadAllText(ownerPath).Trim() == Environment.ProcessId.ToString(System.Globalization.CultureInfo.InvariantCulture))
+            {
+                File.Delete(ownerPath);
+            }
+        }
+        catch
+        {
+            // Lock metadata is diagnostic only; OS-level file ownership remains authoritative.
+        }
+    }
+
+    private sealed record AcquiredSessionLock(FileStream Stream, string OwnerPath);
+
+    private async Task WaitForAuthorizationChangeAsync(
+        TdApi.AuthorizationState previousState,
+        TimeSpan? timeout = null)
     {
         var source = _authorizationChanged;
         if (!ReferenceEquals(_authorizationState, previousState))
@@ -229,7 +303,7 @@ internal sealed class TelegramSession : IAsyncDisposable
             return;
         }
 
-        var state = await source.Task.WaitAsync(TimeSpan.FromMinutes(5));
+        var state = await source.Task.WaitAsync(timeout ?? TimeSpan.FromMinutes(5));
         await HandleAuthorizationStateAsync(state);
     }
 

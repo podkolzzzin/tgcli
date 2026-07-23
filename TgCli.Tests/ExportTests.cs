@@ -1,8 +1,10 @@
 using Newtonsoft.Json.Linq;
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Text.Json;
+using System.Threading;
 using System.Threading.Tasks;
 using TdLib;
 using Xunit;
@@ -140,6 +142,170 @@ public sealed class ExportTests
     }
 
     [Fact]
+    public void VideoAttachmentStatisticsReportMessageAndUniqueTotals()
+    {
+        static TdApi.Message Video(long messageId, int fileId, long size, string uniqueId)
+        {
+            return new TdApi.Message
+            {
+                Id = messageId,
+                Content = new TdApi.MessageContent.MessageVideo
+                {
+                    Video = new TdApi.Video
+                    {
+                        Video_ = new TdApi.File
+                        {
+                            Id = fileId,
+                            Size = size,
+                            Remote = new TdApi.RemoteFile { Id = $"remote-{fileId}", UniqueId = uniqueId }
+                        }
+                    }
+                }
+            };
+        }
+
+        var videoNote = new TdApi.Message
+        {
+            Id = 3,
+            Content = new TdApi.MessageContent.MessageVideoNote
+            {
+                VideoNote = new TdApi.VideoNote
+                {
+                    Video = new TdApi.File { Id = 3, Size = 400 }
+                }
+            }
+        };
+
+        var summary = AttachmentStatistics.Build(
+            [Video(1, 1, 100, "same-video"), Video(2, 2, 200, "same-video"), videoNote],
+            "video");
+
+        Assert.Equal("video", summary.Value<string>("type"));
+        Assert.Equal(2, summary.Value<int>("count"));
+        Assert.Equal(300, summary.Value<long>("total_size_bytes"));
+        Assert.Equal(1, summary.Value<int>("unique_count"));
+        Assert.Equal(100, summary.Value<long>("unique_total_size_bytes"));
+        Assert.Equal(0, summary.Value<int>("unknown_size_count"));
+    }
+
+    [Fact]
+    public void AttachmentStatisticsFallBackToExpectedSize()
+    {
+        var message = new TdApi.Message
+        {
+            Id = 1,
+            Content = new TdApi.MessageContent.MessageVideo
+            {
+                Video = new TdApi.Video
+                {
+                    Video_ = new TdApi.File
+                    {
+                        Id = 1,
+                        Size = 0,
+                        ExpectedSize = 1234
+                    }
+                }
+            }
+        };
+
+        var summary = AttachmentStatistics.Build([message], "video");
+
+        Assert.Equal(1234, summary.Value<long>("total_size_bytes"));
+        Assert.Equal(1, summary.Value<int>("known_size_count"));
+    }
+
+    [Fact]
+    public async Task ForumTopicHistoryPaginatesToAnExactBoundary()
+    {
+        var requests = new List<TdApi.GetForumTopicHistory>();
+        var pages = new Queue<TdApi.Messages>(
+        [
+            new TdApi.Messages
+            {
+                Messages_ = Enumerable.Range(101, 100)
+                    .Reverse()
+                    .Select(id => new TdApi.Message { Id = id })
+                    .ToArray()
+            },
+            new TdApi.Messages
+            {
+                Messages_ = Enumerable.Range(51, 50)
+                    .Reverse()
+                    .Select(id => new TdApi.Message { Id = id })
+                    .ToArray()
+            }
+        ]);
+
+        var result = await ForumTopicHistory.FetchAsync(
+            chatId: -1001,
+            topicId: 10,
+            fromMessageId: 0,
+            offset: 0,
+            limit: 100,
+            all: true,
+            maxPages: 10,
+            (request, _) =>
+            {
+                requests.Add(request);
+                return Task.FromResult(pages.Dequeue());
+            },
+            CancellationToken.None);
+
+        Assert.True(result.Complete);
+        Assert.Equal("short_page", result.TerminationReason);
+        Assert.Equal(2, result.PagesFetched);
+        Assert.Equal(150, result.Messages.Count);
+        Assert.Equal(101, requests[1].FromMessageId);
+        Assert.All(requests, request => Assert.Equal(10, request.ForumTopicId));
+    }
+
+    [Fact]
+    public async Task ForumTopicHistoryRejectsAStalledCursor()
+    {
+        var messages = Enumerable.Range(901, 100)
+            .Reverse()
+            .Select(id => new TdApi.Message { Id = id })
+            .ToArray();
+        var result = await ForumTopicHistory.FetchAsync(
+            chatId: -1001,
+            topicId: 10,
+            fromMessageId: 0,
+            offset: 0,
+            limit: 100,
+            all: true,
+            maxPages: 10,
+            (_, _) => Task.FromResult(new TdApi.Messages { Messages_ = messages }),
+            CancellationToken.None);
+
+        Assert.False(result.Complete);
+        Assert.Equal("cursor_stalled", result.TerminationReason);
+        Assert.Equal(2, result.PagesFetched);
+    }
+
+    [Fact]
+    public async Task ForumTopicHistoryReportsMaxPageTruncation()
+    {
+        var result = await ForumTopicHistory.FetchAsync(
+            chatId: -1001,
+            topicId: 10,
+            fromMessageId: 0,
+            offset: 0,
+            limit: 100,
+            all: true,
+            maxPages: 1,
+            (_, _) => Task.FromResult(new TdApi.Messages
+            {
+                Messages_ = Enumerable.Range(1, 100)
+                    .Select(id => new TdApi.Message { Id = id })
+                    .ToArray()
+            }),
+            CancellationToken.None);
+
+        Assert.False(result.Complete);
+        Assert.Equal("max_pages_reached", result.TerminationReason);
+    }
+
+    [Fact]
     public void LightweightJsonRowsUseSnakeCaseNames()
     {
         var chatJson = JsonSerializer.Serialize(new ChatRow(1, "title", "private", "user", 0, "last"));
@@ -232,5 +398,40 @@ public sealed class ExportTests
         Assert.Equal("""{"apiId":1,"apiHash":"hash"}""", File.ReadAllText(Path.Combine(target, "config.json")));
         Assert.Equal("auth-state", File.ReadAllText(Path.Combine(target, "tdlib-db", "td.binlog")));
         Assert.False(File.Exists(Path.Combine(target, "tdlib-db", "db.sqlite")));
+    }
+
+    [Fact]
+    public void SessionLockCanRepairStaleOwnerMetadata()
+    {
+        var session = Path.Combine(Path.GetTempPath(), "tgcli-lock-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(session);
+        File.WriteAllText(Path.Combine(session, "tdlib.lock"), string.Empty);
+        File.WriteAllText(Path.Combine(session, "tdlib.lock.owner"), "12345");
+
+        var before = SessionLock.Inspect(session);
+        var after = SessionLock.RepairStale(session);
+
+        Assert.False(before.locked);
+        Assert.True(before.owner_metadata_stale);
+        Assert.Equal("12345", before.owner);
+        Assert.False(after.locked);
+        Assert.False(after.owner_metadata_stale);
+        Assert.Null(after.owner);
+    }
+
+    [Fact]
+    public void SessionLockRefusesToRepairAnActiveOwner()
+    {
+        var session = Path.Combine(Path.GetTempPath(), "tgcli-lock-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(session);
+        var lockPath = Path.Combine(session, "tdlib.lock");
+        File.WriteAllText(Path.Combine(session, "tdlib.lock.owner"), "54321");
+        using var held = new FileStream(lockPath, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
+
+        var status = SessionLock.Inspect(session);
+
+        Assert.True(status.locked);
+        Assert.Equal("54321", status.owner);
+        Assert.Throws<IOException>(() => SessionLock.RepairStale(session));
     }
 }
