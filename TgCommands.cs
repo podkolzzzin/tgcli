@@ -109,7 +109,115 @@ public sealed class TgCommands
         Console.WriteLine(destination);
     }
 
-    private static async Task<TdApi.File> ResolveDownloadFileAsync(
+    /// <summary>
+    /// Download many message attachments concurrently through one TDLib client.
+    /// </summary>
+    /// <param name="input">JSONL file with chat_id and message_id per row, or - for stdin.</param>
+    /// <param name="type">Attachment type applied to every row. If omitted, each row may provide type.</param>
+    /// <param name="output">Destination directory. Defaults to the current directory.</param>
+    /// <param name="parallel">Maximum concurrent downloads, from 1 to 32.</param>
+    /// <param name="format">Output format: jsonl or plain.</param>
+    /// <param name="session">Session directory. Defaults to ~/.local/share/tgcli.</param>
+    public async Task DownloadBatch(
+        string input,
+        string? type = null,
+        string output = ".",
+        int parallel = 4,
+        string format = "jsonl",
+        string? session = null,
+        CancellationToken cancellationToken = default)
+    {
+        var normalizedFormat = format.Trim().ToLowerInvariant();
+        if (normalizedFormat is not ("jsonl" or "plain"))
+        {
+            throw new ArgumentException("Format must be one of: jsonl, plain.", nameof(format));
+        }
+
+        BatchDownloads.ValidateParallelism(parallel);
+        IReadOnlyList<BatchDownloadRequest> requests;
+        if (input == "-")
+        {
+            requests = BatchDownloads.Read(Console.In, type);
+        }
+        else
+        {
+            using var reader = File.OpenText(Path.GetFullPath(input));
+            requests = BatchDownloads.Read(reader, type);
+        }
+
+        var outputDirectory = Path.GetFullPath(output);
+        Directory.CreateDirectory(outputDirectory);
+        await using var tg = await TelegramSession.CreateReadyAsync(session);
+        var results = new BatchDownloadResult[requests.Count];
+
+        await Parallel.ForEachAsync(
+            requests,
+            new ParallelOptions
+            {
+                MaxDegreeOfParallelism = parallel,
+                CancellationToken = cancellationToken
+            },
+            async (request, _) =>
+            {
+                try
+                {
+                    var file = await ResolveDownloadFileAsync(
+                        tg,
+                        request.Type,
+                        attachmentId: null,
+                        request.ChatId,
+                        request.MessageId);
+                    file = await DownloadFileWithRefreshAsync(
+                        tg,
+                        file,
+                        request.Type,
+                        request.ChatId,
+                        request.MessageId);
+
+                    if (string.IsNullOrWhiteSpace(file.Local?.Path) || !File.Exists(file.Local.Path))
+                    {
+                        throw new InvalidOperationException($"TDLib did not provide a downloaded local path for file_id={file.Id}.");
+                    }
+
+                    var destination = BatchDownloads.ResolveDestination(outputDirectory, request, file);
+                    File.Copy(file.Local.Path, destination, overwrite: true);
+                    results[request.Index] = new BatchDownloadResult(
+                        request.Index,
+                        request.ChatId,
+                        request.MessageId,
+                        file.Id,
+                        destination,
+                        Error: null);
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    results[request.Index] = new BatchDownloadResult(
+                        request.Index,
+                        request.ChatId,
+                        request.MessageId,
+                        FileId: null,
+                        Path: null,
+                        ex.Message);
+                }
+            });
+
+        foreach (var result in results)
+        {
+            Console.WriteLine(normalizedFormat == "jsonl"
+                ? BatchDownloads.ToJson(result).ToString(Formatting.None)
+                : result.Ok
+                    ? result.Path
+                    : $"ERROR\t{result.ChatId}\t{result.MessageId}\t{result.Error}");
+        }
+
+        var failed = results.Count(x => !x.Ok);
+        if (failed > 0)
+        {
+            throw new InvalidOperationException($"{failed} of {results.Length} batch downloads failed.");
+        }
+    }
+
+    internal static async Task<TdApi.File> ResolveDownloadFileAsync(
         TelegramSession tg,
         string? type,
         string? attachmentId,
@@ -162,7 +270,7 @@ public sealed class TgCommands
         return await tg.Client.GetRemoteFileAsync(attachmentId, AttachmentKinds.ToFileType(kind));
     }
 
-    private static async Task<TdApi.File> DownloadFileWithRefreshAsync(
+    internal static async Task<TdApi.File> DownloadFileWithRefreshAsync(
         TelegramSession tg,
         TdApi.File file,
         string? type,
@@ -183,7 +291,7 @@ public sealed class TgCommands
         }
     }
 
-    private static async Task<TdApi.File> DownloadFileAsync(TelegramSession tg, TdApi.File file)
+    internal static async Task<TdApi.File> DownloadFileAsync(TelegramSession tg, TdApi.File file)
     {
         if (file.Local is { IsDownloadingCompleted: true } &&
             !string.IsNullOrWhiteSpace(file.Local.Path) &&

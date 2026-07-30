@@ -341,6 +341,69 @@ public sealed class ExportTests
     }
 
     [Fact]
+    public void BatchDownloadReadsExportJsonlRows()
+    {
+        using var reader = new StringReader(
+            """
+            {"schema":"tgcli.message","chat_id":-1001,"message_id":1048576,"kind":"video"}
+            {"chat_id":-1001,"message_id":2097152,"type":"photo"}
+            """);
+
+        var requests = BatchDownloads.Read(reader, defaultType: null);
+
+        Assert.Equal(2, requests.Count);
+        Assert.Equal((-1001L, 1048576L, null), (requests[0].ChatId, requests[0].MessageId, requests[0].Type));
+        Assert.Equal((-1001L, 2097152L, "photo"), (requests[1].ChatId, requests[1].MessageId, requests[1].Type));
+    }
+
+    [Fact]
+    public void BatchDownloadGlobalTypeOverridesRows()
+    {
+        using var reader = new StringReader("""{"chat_id":1,"message_id":2,"type":"photo"}""");
+
+        var request = Assert.Single(BatchDownloads.Read(reader, defaultType: "video"));
+
+        Assert.Equal("video", request.Type);
+    }
+
+    [Fact]
+    public void BatchDownloadRejectsDuplicateMessages()
+    {
+        using var reader = new StringReader(
+            """
+            {"chat_id":1,"message_id":2}
+            {"chat_id":1,"message_id":2}
+            """);
+
+        Assert.Throws<System.ComponentModel.DataAnnotations.ValidationException>(
+            () => BatchDownloads.Read(reader, defaultType: null));
+    }
+
+    [Fact]
+    public void BatchDownloadDestinationIsUniquePerMessage()
+    {
+        var file = new TdApi.File
+        {
+            Id = 1254,
+            Local = new TdApi.LocalFile { Path = "/tmp/video.mp4" }
+        };
+        var request = new BatchDownloadRequest(0, -1001, 2097152, "video");
+
+        var destination = BatchDownloads.ResolveDestination("/tmp/output", request, file);
+
+        Assert.Equal(Path.GetFullPath("/tmp/output/-1001_2097152_video.mp4"), destination);
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(33)]
+    public void BatchDownloadRejectsUnsafeParallelism(int parallel)
+    {
+        Assert.Throws<System.ComponentModel.DataAnnotations.ValidationException>(
+            () => BatchDownloads.ValidateParallelism(parallel));
+    }
+
+    [Fact]
     public async Task AttachmentIndexCanRoundTripFileMetadata()
     {
         var session = Path.Combine(Path.GetTempPath(), "tgcli-cache-" + Guid.NewGuid().ToString("N"));

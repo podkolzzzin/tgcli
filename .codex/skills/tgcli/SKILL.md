@@ -5,7 +5,7 @@ description: Use this project-scoped skill when Codex needs to inspect Telegram 
 
 # tgcli
 
-Use `tgcli --help` or `<command> --help` if flags may have changed. Prefer v6 commands (`tgcli --version` => `6.x`) for forum-topic history and attachment totals, BotFather-backed bot management, bot chat interaction, the versioned rich export schema, channel-aware pagination, integrity manifests, channel metrics/comments, incremental caches, diagnostics, and conversation context.
+Use `tgcli --help` or `<command> --help` if flags may have changed. Prefer v6.2+ commands for concurrent batch downloads, forum-topic history and attachment totals, BotFather-backed bot management, bot chat interaction, the versioned rich export schema, channel-aware pagination, integrity manifests, channel metrics/comments, incremental caches, diagnostics, and conversation context.
 
 Core flow:
 
@@ -19,7 +19,7 @@ Core flow:
 8. Build links: `tgcli link message --chat-id <id> --message-id <message-id> --format json`.
 9. Inspect one message with files/links: `tgcli message get --chat-id <id> --message-id <message-id> --format json`.
 10. Export/import only Telegram authorization state with `tgcli session export > tgcli.session` and `tgcli session import < tgcli.session`.
-11. Download files by message when possible: `tgcli download --chat-id <id> --message-id <message-id> --output <path>`. Fallback: `tgcli download --type <type> --attachment-id <file-id-or-remote-id> --output <path>`.
+11. Download files by message when possible: `tgcli download --chat-id <id> --message-id <message-id> --output <path>`. Batch-download JSONL message references with `tgcli download-batch --input <rows.jsonl> --output <dir> --parallel 4`. Fallback: `tgcli download --type <type> --attachment-id <file-id-or-remote-id> --output <path>`.
 12. Manage and interact with bots: `tgcli bot list`, `tgcli bot create --name "<name>" --username <unique_bot>`, `tgcli bot token --username <bot>`, `tgcli bot write --username <bot> --text /start --format json`, and `tgcli bot remove --username <bot> --confirm`.
 13. For forum supergroups, list topics with `tgcli forum topics --chat-id <id> --all --format jsonl`, then pass `--topic-id <id>` to `chat messages`, `chat search`, or `chat stats`.
 
@@ -73,6 +73,8 @@ Service messages and stats:
 Attachment notes:
 
 - Prefer `tgcli download --chat-id <id> --message-id <message-id>`; it re-reads the message and chooses the attached file.
+- For multiple files, feed JSONL from filtered `chat search`, `chat messages`, or `chat export` into `tgcli download-batch --input <rows.jsonl> --type <kind> --output <dir> --parallel 4`. It uses one TDLib client, preserves input order in its result JSONL, and exits nonzero if any row fails.
+- `download-batch --input -` reads JSONL from stdin. Each non-empty row must contain integer `chat_id` and `message_id`; an optional row-level `type` is used unless the command-level `--type` overrides it.
 - In older exported Markdown, `_file_id` may be stale. Prefer `chat-id + message-id` as the durable reference when documenting an attachment.
 - If `tgcli download --attachment-id <file-id>` returns `Not Found`, retry by message. Use `tgcli message get` to inspect current file ids and remote ids.
 - If download still fails, record the message id, old/new file id, kind, and text context instead of embedding a broken local file.
