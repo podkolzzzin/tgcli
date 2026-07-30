@@ -1,5 +1,26 @@
 # Changelog
 
+## 6.2.0
+
+- Add `tgcli download-batch` to download JSONL message references concurrently through one TDLib client.
+- Accept rows from filtered `chat search`, `chat messages`, and `chat export` output using stable `chat_id` and `message_id` references.
+- Add bounded `--parallel` scheduling, collision-resistant output names, stable result ordering, and per-file JSONL errors.
+- Update the TDLib application version reported by tgcli to `6.2.0`.
+
+Install:
+
+```bash
+sudo curl -L https://github.com/podkolzzzin/tgcli/releases/download/v6.2.0/tgcli-linux-x64 -o /usr/local/bin/tgcli && sudo chmod +x /usr/local/bin/tgcli
+```
+
+```powershell
+New-Item -ItemType Directory -Force "$env:ProgramFiles\tgcli" | Out-Null; Invoke-WebRequest "https://github.com/podkolzzzin/tgcli/releases/download/v6.2.0/tgcli-win-x64.exe" -OutFile "$env:ProgramFiles\tgcli\tgcli.exe"; [Environment]::SetEnvironmentVariable("Path", [Environment]::GetEnvironmentVariable("Path", "Machine") + ";$env:ProgramFiles\tgcli", "Machine")
+```
+
+```bash
+sudo curl -L https://github.com/podkolzzzin/tgcli/releases/download/v6.2.0/tgcli-osx-x64 -o /usr/local/bin/tgcli && sudo chmod +x /usr/local/bin/tgcli
+```
+
 ## 6.1.0
 
 - Add `tgcli forum topics` to list forum topic names and stable topic ids.

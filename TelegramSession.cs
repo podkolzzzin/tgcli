@@ -237,7 +237,7 @@ internal sealed class TelegramSession : IAsyncDisposable
                 systemLanguageCode: "en",
                 deviceModel: Environment.MachineName,
                 systemVersion: RuntimeInformation.OSDescription,
-                applicationVersion: "6.1.0");
+                applicationVersion: "6.2.0");
         }
     }
 

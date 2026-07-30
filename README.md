@@ -7,19 +7,19 @@ Small command-line tool for reading Telegram chats with TDLib.
 Linux:
 
 ```bash
-sudo curl -L https://github.com/podkolzzzin/tgcli/releases/download/v6.1.0/tgcli-linux-x64 -o /usr/local/bin/tgcli && sudo chmod +x /usr/local/bin/tgcli
+sudo curl -L https://github.com/podkolzzzin/tgcli/releases/download/v6.2.0/tgcli-linux-x64 -o /usr/local/bin/tgcli && sudo chmod +x /usr/local/bin/tgcli
 ```
 
 Windows PowerShell, as Administrator:
 
 ```powershell
-New-Item -ItemType Directory -Force "$env:ProgramFiles\tgcli" | Out-Null; Invoke-WebRequest "https://github.com/podkolzzzin/tgcli/releases/download/v6.1.0/tgcli-win-x64.exe" -OutFile "$env:ProgramFiles\tgcli\tgcli.exe"; [Environment]::SetEnvironmentVariable("Path", [Environment]::GetEnvironmentVariable("Path", "Machine") + ";$env:ProgramFiles\tgcli", "Machine")
+New-Item -ItemType Directory -Force "$env:ProgramFiles\tgcli" | Out-Null; Invoke-WebRequest "https://github.com/podkolzzzin/tgcli/releases/download/v6.2.0/tgcli-win-x64.exe" -OutFile "$env:ProgramFiles\tgcli\tgcli.exe"; [Environment]::SetEnvironmentVariable("Path", [Environment]::GetEnvironmentVariable("Path", "Machine") + ";$env:ProgramFiles\tgcli", "Machine")
 ```
 
 macOS:
 
 ```bash
-sudo curl -L https://github.com/podkolzzzin/tgcli/releases/download/v6.1.0/tgcli-osx-x64 -o /usr/local/bin/tgcli && sudo chmod +x /usr/local/bin/tgcli
+sudo curl -L https://github.com/podkolzzzin/tgcli/releases/download/v6.2.0/tgcli-osx-x64 -o /usr/local/bin/tgcli && sudo chmod +x /usr/local/bin/tgcli
 ```
 
 Then open a new terminal and run:
@@ -71,6 +71,7 @@ tgcli session import < tgcli.session
 tgcli chat context --chat-id 123456789 --message-id 987654321 --before 10 --after 10
 tgcli diagnostics --format json
 tgcli download --chat-id 123456789 --message-id 987654321 --output ./files
+tgcli download-batch --input attachments.jsonl --output ./files --parallel 4
 tgcli bot list
 tgcli bot create --name "Example Bot" --username example_unique_bot
 tgcli bot token --username example_unique_bot
@@ -80,6 +81,15 @@ tgcli bot remove --username example_unique_bot --confirm
 ```
 
 `download --output` accepts either a file or directory. Existing directories, paths ending with a path separator, and missing paths without an extension are treated as directories.
+
+`download-batch` accepts JSONL with integer `chat_id` and `message_id` fields, including rows produced by filtered `chat search`, `chat messages`, or `chat export` commands. It downloads through one TDLib client with bounded concurrency and writes one result row per input row:
+
+```bash
+tgcli chat search --chat-id 123456789 --query "" --type video --all --format jsonl > videos.jsonl
+tgcli download-batch --input videos.jsonl --type video --output ./videos --parallel 4
+```
+
+Use `--input -` to read JSONL from stdin. Output filenames include the chat and message ids to avoid collisions. JSONL results preserve input order and report per-file failures; the command exits nonzero if any download failed.
 
 ## Export schema and completeness
 
