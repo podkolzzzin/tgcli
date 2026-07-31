@@ -404,6 +404,28 @@ public sealed class ExportTests
     }
 
     [Fact]
+    public void BatchDownloadFormatsImmediateProgressWithoutLeakingErrors()
+    {
+        var result = new BatchDownloadResult(0, -1001, 2097152, 1254, "/tmp/video.mp4", Error: null);
+
+        var progress = BatchDownloads.FormatProgress(result, completed: 3, total: 10);
+
+        Assert.Equal("download-batch: 3/10 downloaded -1001/2097152", progress);
+    }
+
+    [Fact]
+    public void BatchDownloadExposesSessionLockControls()
+    {
+        var parameters = typeof(TgCommands)
+            .GetMethod(nameof(TgCommands.DownloadBatch))!
+            .GetParameters()
+            .ToDictionary(parameter => parameter.Name!);
+
+        Assert.Equal(30, parameters["lockTimeout"].DefaultValue);
+        Assert.Equal(false, parameters["noWait"].DefaultValue);
+    }
+
+    [Fact]
     public async Task AttachmentIndexCanRoundTripFileMetadata()
     {
         var session = Path.Combine(Path.GetTempPath(), "tgcli-cache-" + Guid.NewGuid().ToString("N"));
