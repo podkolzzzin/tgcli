@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Let `download-batch` wait for a busy TDLib session with `--lock-timeout`, or fail immediately with `--no-wait`.
+- Report batch completion progress on stderr while preserving stable ordered JSONL on stdout.
+
 ## 6.2.0
 
 - Add `tgcli download-batch` to download JSONL message references concurrently through one TDLib client.

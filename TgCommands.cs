@@ -117,6 +117,8 @@ public sealed class TgCommands
     /// <param name="output">Destination directory. Defaults to the current directory.</param>
     /// <param name="parallel">Maximum concurrent downloads, from 1 to 32.</param>
     /// <param name="format">Output format: jsonl or plain.</param>
+    /// <param name="lockTimeout">Seconds to wait for another tgcli process to release the TDLib session.</param>
+    /// <param name="noWait">Fail immediately instead of waiting for the TDLib session lock.</param>
     /// <param name="session">Session directory. Defaults to ~/.local/share/tgcli.</param>
     public async Task DownloadBatch(
         string input,
@@ -124,6 +126,8 @@ public sealed class TgCommands
         string output = ".",
         int parallel = 4,
         string format = "jsonl",
+        int lockTimeout = 30,
+        bool noWait = false,
         string? session = null,
         CancellationToken cancellationToken = default)
     {
@@ -147,8 +151,9 @@ public sealed class TgCommands
 
         var outputDirectory = Path.GetFullPath(output);
         Directory.CreateDirectory(outputDirectory);
-        await using var tg = await TelegramSession.CreateReadyAsync(session);
+        await using var tg = await TelegramSession.CreateReadyAsync(session, lockTimeout, noWait);
         var results = new BatchDownloadResult[requests.Count];
+        var completedCount = 0;
 
         await Parallel.ForEachAsync(
             requests,
@@ -159,6 +164,7 @@ public sealed class TgCommands
             },
             async (request, _) =>
             {
+                BatchDownloadResult result;
                 try
                 {
                     var file = await ResolveDownloadFileAsync(
@@ -181,7 +187,7 @@ public sealed class TgCommands
 
                     var destination = BatchDownloads.ResolveDestination(outputDirectory, request, file);
                     File.Copy(file.Local.Path, destination, overwrite: true);
-                    results[request.Index] = new BatchDownloadResult(
+                    result = new BatchDownloadResult(
                         request.Index,
                         request.ChatId,
                         request.MessageId,
@@ -191,7 +197,7 @@ public sealed class TgCommands
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException)
                 {
-                    results[request.Index] = new BatchDownloadResult(
+                    result = new BatchDownloadResult(
                         request.Index,
                         request.ChatId,
                         request.MessageId,
@@ -199,6 +205,10 @@ public sealed class TgCommands
                         Path: null,
                         ex.Message);
                 }
+
+                results[request.Index] = result;
+                var completed = Interlocked.Increment(ref completedCount);
+                Console.Error.WriteLine(BatchDownloads.FormatProgress(result, completed, requests.Count));
             });
 
         foreach (var result in results)

@@ -116,6 +116,12 @@ internal static class BatchDownloads
         };
     }
 
+    public static string FormatProgress(BatchDownloadResult result, int completed, int total)
+    {
+        var status = result.Ok ? "downloaded" : "failed";
+        return $"download-batch: {completed}/{total} {status} {result.ChatId}/{result.MessageId}";
+    }
+
     private static long ReadRequiredInt64(JObject value, string property, int lineNumber)
     {
         var token = value[property];

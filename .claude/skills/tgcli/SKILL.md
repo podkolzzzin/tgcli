@@ -62,8 +62,9 @@ Service messages and stats:
 Attachment notes:
 
 - Prefer `tgcli download --chat-id <id> --message-id <message-id>`; it re-reads the message and chooses the attached file.
-- For multiple files, feed JSONL from filtered `chat search`, `chat messages`, or `chat export` into `tgcli download-batch --input <rows.jsonl> --type <kind> --output <dir> --parallel 4`. It uses one TDLib client, preserves input order in its result JSONL, and exits nonzero if any row fails.
+- For multiple files, feed JSONL from filtered `chat search`, `chat messages`, or `chat export` into `tgcli download-batch --input <rows.jsonl> --type <kind> --output <dir> --parallel 4 --lock-timeout 3600`. It uses one TDLib client, reports progress on stderr, preserves input order in its result JSONL, and exits nonzero if any row fails.
 - `download-batch --input -` reads JSONL from stdin. Each non-empty row must contain integer `chat_id` and `message_id`; an optional row-level `type` is used unless the command-level `--type` overrides it.
+- If a batch finds the session busy, wait with `--lock-timeout`; don't clone an active session as a workaround because reusing its authorization key concurrently can invalidate or stall the session.
 - In older exported Markdown, `_file_id` may be stale. Prefer `chat-id + message-id` as the durable reference when documenting an attachment.
 - If `tgcli download --attachment-id <file-id>` returns `Not Found`, retry by message. Use `tgcli message get` to inspect current file ids and remote ids.
 - If download still fails, record the message id, old/new file id, kind, and text context instead of embedding a broken local file.

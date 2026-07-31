@@ -86,10 +86,10 @@ tgcli bot remove --username example_unique_bot --confirm
 
 ```bash
 tgcli chat search --chat-id 123456789 --query "" --type video --all --format jsonl > videos.jsonl
-tgcli download-batch --input videos.jsonl --type video --output ./videos --parallel 4
+tgcli download-batch --input videos.jsonl --type video --output ./videos --parallel 4 --lock-timeout 3600
 ```
 
-Use `--input -` to read JSONL from stdin. Output filenames include the chat and message ids to avoid collisions. JSONL results preserve input order and report per-file failures; the command exits nonzero if any download failed.
+Use `--input -` to read JSONL from stdin. Output filenames include the chat and message ids to avoid collisions. JSONL results preserve input order and report per-file failures; progress is written to stderr as each file completes, and the command exits nonzero if any download failed. Use `--lock-timeout <seconds>` to wait for another tgcli command that already owns the TDLib session, or `--no-wait` to fail immediately.
 
 ## Export schema and completeness
 
