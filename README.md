@@ -2,9 +2,9 @@
 
 Small command-line tool for reading Telegram chats with TDLib.
 
-## MCP (unreleased)
+## MCP
 
-The source tree includes a local MCP server and installers for Claude Desktop/Code CLI, Codex Desktop/CLI, and Copilot CLI/IDEs. The v6.2.0 release downloads below predate this feature; build this checkout to use it.
+Version 6.3.0 includes a local MCP server and installers for Claude Desktop/Code CLI, Codex Desktop/CLI, and Copilot CLI/IDEs.
 
 ```bash
 tgcli mcp
@@ -27,19 +27,19 @@ Pull requests and main-branch changes run published-binary MCP end-to-end tests 
 Linux:
 
 ```bash
-sudo curl -L https://github.com/podkolzzzin/tgcli/releases/download/v6.2.0/tgcli-linux-x64 -o /usr/local/bin/tgcli && sudo chmod +x /usr/local/bin/tgcli
+sudo curl -L https://github.com/podkolzzzin/tgcli/releases/download/v6.3.0/tgcli-linux-x64 -o /usr/local/bin/tgcli && sudo chmod +x /usr/local/bin/tgcli
 ```
 
 Windows PowerShell, as Administrator:
 
 ```powershell
-New-Item -ItemType Directory -Force "$env:ProgramFiles\tgcli" | Out-Null; Invoke-WebRequest "https://github.com/podkolzzzin/tgcli/releases/download/v6.2.0/tgcli-win-x64.exe" -OutFile "$env:ProgramFiles\tgcli\tgcli.exe"; [Environment]::SetEnvironmentVariable("Path", [Environment]::GetEnvironmentVariable("Path", "Machine") + ";$env:ProgramFiles\tgcli", "Machine")
+New-Item -ItemType Directory -Force "$env:ProgramFiles\tgcli" | Out-Null; Invoke-WebRequest "https://github.com/podkolzzzin/tgcli/releases/download/v6.3.0/tgcli-win-x64.exe" -OutFile "$env:ProgramFiles\tgcli\tgcli.exe"; [Environment]::SetEnvironmentVariable("Path", [Environment]::GetEnvironmentVariable("Path", "Machine") + ";$env:ProgramFiles\tgcli", "Machine")
 ```
 
 macOS:
 
 ```bash
-sudo curl -L https://github.com/podkolzzzin/tgcli/releases/download/v6.2.0/tgcli-osx-x64 -o /usr/local/bin/tgcli && sudo chmod +x /usr/local/bin/tgcli
+sudo curl -L https://github.com/podkolzzzin/tgcli/releases/download/v6.3.0/tgcli-osx-x64 -o /usr/local/bin/tgcli && sudo chmod +x /usr/local/bin/tgcli
 ```
 
 Then open a new terminal and run:

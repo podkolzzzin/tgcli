@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 6.3.0 (2026-09-09)
 
 - Add `tgcli mcp` with 12 Telegram read/search/download tools, lazy session initialization, bounded request waits, serialized native operations and stdio-only protocol output.
 - Target MCP `2026-07-28` and retain legacy initialization compatibility, with raw JSON-RPC process tests for both paths.
@@ -8,6 +8,21 @@
 - Include local adapters for Claude Desktop/Code, shared Codex CLI/Desktop configuration, Copilot CLI, VS Code Stable/Insiders profiles, Visual Studio, JetBrains, Xcode and known Eclipse workspaces. Desktop/IDE runtime verification remains pending; see `MCP.md`.
 - Retain the Telegram database lock until native shutdown completes, including when bounded shutdown waiting expires.
 - Add hermetic published-binary MCP end-to-end tests for protocol negotiation, native CLI registration, Desktop/IDE profile adapters, persisted launch commands, backups and idempotency; run them on Linux, macOS and Windows for pull requests, main and releases.
+- Update the TDLib application version reported by tgcli to `6.3.0`.
+
+Install:
+
+```bash
+sudo curl -L https://github.com/podkolzzzin/tgcli/releases/download/v6.3.0/tgcli-linux-x64 -o /usr/local/bin/tgcli && sudo chmod +x /usr/local/bin/tgcli
+```
+
+```powershell
+New-Item -ItemType Directory -Force "$env:ProgramFiles\tgcli" | Out-Null; Invoke-WebRequest "https://github.com/podkolzzzin/tgcli/releases/download/v6.3.0/tgcli-win-x64.exe" -OutFile "$env:ProgramFiles\tgcli\tgcli.exe"; [Environment]::SetEnvironmentVariable("Path", [Environment]::GetEnvironmentVariable("Path", "Machine") + ";$env:ProgramFiles\tgcli", "Machine")
+```
+
+```bash
+sudo curl -L https://github.com/podkolzzzin/tgcli/releases/download/v6.3.0/tgcli-osx-x64 -o /usr/local/bin/tgcli && sudo chmod +x /usr/local/bin/tgcli
+```
 
 ## 6.2.0
 

@@ -1,6 +1,6 @@
-# tgcli MCP (unreleased)
+# tgcli MCP
 
-This checkout implements a local stdio MCP server. The published v6.2.0 binaries predate it. Build this checkout with .NET 10, then keep the resulting executable in a stable location before registering it in clients.
+tgcli 6.3.0 implements a local stdio MCP server. Keep the installed executable in a stable location before registering it in clients.
 
 ```bash
 dotnet publish TgCli.csproj -c Release -r linux-x64 --self-contained true \
