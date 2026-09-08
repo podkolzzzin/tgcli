@@ -182,8 +182,10 @@ def read_entry(path, root_key):
 
 
 def verify_installations(executable, home, paths, originals):
-    session = str((home / "session with spaces").resolve())
-    expected_command = str(Path(executable).resolve())
+    # Match .NET Path.GetFullPath: normalize the path without resolving platform
+    # symlinks such as macOS /var -> /private/var.
+    session = os.path.abspath(home / "session with spaces")
+    expected_command = os.path.abspath(executable)
     entries = {}
     for name, path in paths.items():
         if name.endswith("signal") or not path.is_file():
@@ -203,14 +205,14 @@ def verify_installations(executable, home, paths, originals):
 def verify_native_calls(home, executable):
     calls = [json.loads(line) for line in (home / "fake-client-calls.jsonl").read_text(encoding="utf-8").splitlines()]
     assert [call["family"] for call in calls] == ["claude", "codex", "copilot"], calls
-    expected = str(Path(executable).resolve())
+    expected = os.path.abspath(executable)
     for call in calls:
         separator = call["args"].index("--")
         prefix = (["mcp", "add", "--transport", "stdio", "--scope", "user", "tgcli", "--"]
                   if call["family"] == "claude" else ["mcp", "add", "tgcli", "--"])
         assert call["args"][:separator + 1] == prefix, call
         assert call["args"][separator + 1] == expected
-        assert call["args"][separator + 2:] == ["mcp", "--session", str((home / "session with spaces").resolve())]
+        assert call["args"][separator + 2:] == ["mcp", "--session", os.path.abspath(home / "session with spaces")]
 
 
 def run(executable):

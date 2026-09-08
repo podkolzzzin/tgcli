@@ -177,7 +177,7 @@ public sealed class McpInstallerTests
     public void ClaudeDesktopConfigPathsDoNotDependOnCli(string os, string profile)
     {
         using var temp = new TestDirectory();
-        var directory = Path.Combine(temp.Path, profile); Directory.CreateDirectory(directory);
+        var directory = Path.Combine(temp.Path, profile.Replace('/', Path.DirectorySeparatorChar)); Directory.CreateDirectory(directory);
         var targets = McpClientDiscovery.Find("claude", new(temp.Path, os, new Dictionary<string, string>()));
         var desktop = targets.Single(t => t.Client == "Claude Desktop");
         Assert.True(desktop.Installed);
