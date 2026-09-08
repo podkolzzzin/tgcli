@@ -181,19 +181,25 @@ def read_entry(path, root_key):
     return json.loads(path.read_text(encoding="utf-8"))[root_key]["tgcli"]
 
 
+def dotnet_full_path(path):
+    # Windows expands runner temp-path aliases; Unix Path.GetFullPath leaves
+    # filesystem symlinks such as macOS /var -> /private/var unresolved.
+    normalized = os.path.realpath(path) if os.name == "nt" else os.path.abspath(path)
+    return os.path.normcase(normalized)
+
+
 def verify_installations(executable, home, paths, originals):
-    # Match .NET Path.GetFullPath: normalize the path without resolving platform
-    # symlinks such as macOS /var -> /private/var.
-    session = os.path.abspath(home / "session with spaces")
-    expected_command = os.path.abspath(executable)
+    session = dotnet_full_path(home / "session with spaces")
+    expected_command = dotnet_full_path(executable)
     entries = {}
     for name, path in paths.items():
         if name.endswith("signal") or not path.is_file():
             continue
         root_key = "mcpServers" if name in {"claude_cli", "claude_desktop", "copilot_cli"} else "servers"
         entries[name] = read_entry(path, root_key)
-        assert entries[name]["command"] == expected_command, (name, entries[name])
-        assert entries[name]["args"] == ["mcp", "--session", session], (name, entries[name])
+        assert dotnet_full_path(entries[name]["command"]) == expected_command, (name, entries[name])
+        assert entries[name]["args"][:2] == ["mcp", "--session"], (name, entries[name])
+        assert dotnet_full_path(entries[name]["args"][2]) == session, (name, entries[name])
         if name in originals:
             backups = list(path.parent.glob(path.name + ".tgcli-backup-*"))
             assert len(backups) == 1, (name, backups)
@@ -205,14 +211,15 @@ def verify_installations(executable, home, paths, originals):
 def verify_native_calls(home, executable):
     calls = [json.loads(line) for line in (home / "fake-client-calls.jsonl").read_text(encoding="utf-8").splitlines()]
     assert [call["family"] for call in calls] == ["claude", "codex", "copilot"], calls
-    expected = os.path.abspath(executable)
+    expected = dotnet_full_path(executable)
     for call in calls:
         separator = call["args"].index("--")
         prefix = (["mcp", "add", "--transport", "stdio", "--scope", "user", "tgcli", "--"]
                   if call["family"] == "claude" else ["mcp", "add", "tgcli", "--"])
         assert call["args"][:separator + 1] == prefix, call
-        assert call["args"][separator + 1] == expected
-        assert call["args"][separator + 2:] == ["mcp", "--session", os.path.abspath(home / "session with spaces")]
+        assert dotnet_full_path(call["args"][separator + 1]) == expected
+        assert call["args"][separator + 2:separator + 4] == ["mcp", "--session"]
+        assert dotnet_full_path(call["args"][separator + 4]) == dotnet_full_path(home / "session with spaces")
 
 
 def run(executable):
