@@ -36,11 +36,19 @@ jobs:
         with:
           dotnet-version: 10.0.x
 
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
       - name: Restore
         run: dotnet restore TgCli.csproj
 
       - name: Audit packages
         run: dotnet list TgCli.csproj package --vulnerable --include-transitive
+
+      - name: Test CLI and MCP
+        run: dotnet test TgCli.Tests/TgCli.Tests.csproj -c Release
 
       - name: Publish
         shell: bash
@@ -57,6 +65,10 @@ jobs:
             -p:DebugType=none \
             -p:DebugSymbols=false \
             -o "artifacts/${{ matrix.rid }}"
+
+      - name: MCP end-to-end tests
+        shell: bash
+        run: python tools/e2e_mcp.py "artifacts/${{ matrix.rid }}/${{ matrix.binary }}"
 
       - name: Package
         shell: bash

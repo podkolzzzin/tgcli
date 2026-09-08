@@ -27,7 +27,7 @@ internal static class ForumTopicHistory
         bool all,
         int maxPages,
         int requestTimeout,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken, bool retainNativeOperation = false)
     {
         ValidateTopicId(topicId);
         ValidateRequestTimeout(requestTimeout);
@@ -44,6 +44,7 @@ internal static class ForumTopicHistory
             {
                 try
                 {
+                    if (retainNativeOperation) return await tg.Client.ExecuteAsync(request);
                     return await tg.Client.ExecuteAsync(request)
                         .WaitAsync(TimeSpan.FromSeconds(requestTimeout), token);
                 }

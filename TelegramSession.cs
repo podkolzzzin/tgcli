@@ -25,6 +25,8 @@ internal sealed class TelegramSession : IAsyncDisposable
     public string DatabaseDirectory => _config.DatabaseDirectory;
     public string FilesDirectory => _config.FilesDirectory;
 
+    internal static string ResolveSessionDirectory(string? path) => Path.GetFullPath(path ?? SessionConfig.DefaultRootDirectory());
+
     public static async Task<TelegramSession> CreateAsync(string? sessionDirectory, int apiId, string? apiHash, bool saveConfig, int lockTimeout = 30, bool noWait = false)
     {
         var config = SessionConfig.Load(sessionDirectory);
@@ -97,8 +99,8 @@ internal sealed class TelegramSession : IAsyncDisposable
                     await Client.SetAuthenticationPhoneNumberAsync(phone, settings: null!);
                     break;
 
-                case TdApi.AuthorizationState.AuthorizationStateWaitCode:
-                    await Client.CheckAuthenticationCodeAsync(Prompt("Code"));
+                case TdApi.AuthorizationState.AuthorizationStateWaitCode waitCode:
+                    await HandleAuthenticationCodeAsync(waitCode.CodeInfo);
                     break;
 
                 case TdApi.AuthorizationState.AuthorizationStateWaitPassword waitPassword:
@@ -178,29 +180,29 @@ internal sealed class TelegramSession : IAsyncDisposable
         throw new TimeoutException("Timed out while waiting for TDLib authorization state.");
     }
 
+    private Task? _disposeTask;
+
     public async ValueTask DisposeAsync()
     {
         Client.UpdateReceived -= OnUpdateReceived;
-        try
+        _disposeTask ??= CloseAndReleaseAsync();
+        if (await Task.WhenAny(_disposeTask, Task.Delay(TimeSpan.FromSeconds(10))) == _disposeTask)
+            await _disposeTask;
+        else
         {
-            var disposeTask = Task.Run(Client.Dispose);
-            if (await Task.WhenAny(disposeTask, Task.Delay(TimeSpan.FromSeconds(10))) == disposeTask)
-            {
-                await disposeTask;
-            }
-            else
-            {
-                Console.Error.WriteLine("Warning: TDLib shutdown exceeded 10 seconds; continuing process shutdown.");
-            }
+            // The native client may still be using its database. Retain the file lock
+            // until native disposal actually completes, or until this process exits.
+            Console.Error.WriteLine("Warning: TDLib shutdown exceeded 10 seconds; retaining its session lock until native shutdown or process exit.");
+            _ = _disposeTask.ContinueWith(t => _ = t.Exception, CancellationToken.None,
+                TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
         }
-        finally
-        {
-            await (_lockStream?.DisposeAsync() ?? ValueTask.CompletedTask);
-            if (_lockOwnerPath is not null)
-            {
-                DeleteOwnedLockMetadata(_lockOwnerPath);
-            }
-        }
+    }
+
+    private async Task CloseAndReleaseAsync()
+    {
+        await Task.Run(Client.Dispose);
+        await (_lockStream?.DisposeAsync() ?? ValueTask.CompletedTask);
+        if (_lockOwnerPath is not null) DeleteOwnedLockMetadata(_lockOwnerPath);
     }
 
     private async Task InitializeAsync()
@@ -239,6 +241,74 @@ internal sealed class TelegramSession : IAsyncDisposable
                 systemVersion: RuntimeInformation.OSDescription,
                 applicationVersion: "6.2.0");
         }
+    }
+
+    private async Task HandleAuthenticationCodeAsync(TdApi.AuthenticationCodeInfo codeInfo)
+    {
+        Console.WriteLine($"Telegram sent the login code {DescribeCodeDelivery(codeInfo.Type, codeInfo.PhoneNumber)}.");
+
+        var resendAvailableAt = DateTimeOffset.UtcNow.AddSeconds(Math.Max(0, codeInfo.Timeout));
+        if (codeInfo.NextType is not null)
+        {
+            var delay = codeInfo.Timeout > 0 ? $" after {codeInfo.Timeout} seconds" : string.Empty;
+            Console.WriteLine($"If it doesn't arrive, enter 'resend' to request it {DescribeCodeDelivery(codeInfo.NextType, codeInfo.PhoneNumber)}{delay}.");
+        }
+
+        while (true)
+        {
+            var code = Prompt(codeInfo.NextType is null ? "Code" : "Code (or 'resend')");
+            if (!string.Equals(code, "resend", StringComparison.OrdinalIgnoreCase))
+            {
+                await Client.CheckAuthenticationCodeAsync(code);
+                return;
+            }
+
+            if (codeInfo.NextType is null)
+            {
+                Console.WriteLine("Telegram did not provide another delivery method for this login.");
+                continue;
+            }
+
+            var remaining = resendAvailableAt - DateTimeOffset.UtcNow;
+            if (remaining > TimeSpan.Zero)
+            {
+                Console.WriteLine($"Waiting {Math.Ceiling(remaining.TotalSeconds):0} seconds before requesting another code...");
+                await Task.Delay(remaining);
+            }
+
+            await Client.ResendAuthenticationCodeAsync(
+                new TdApi.ResendCodeReason.ResendCodeReasonUserRequest());
+            return;
+        }
+    }
+
+    internal static string DescribeCodeDelivery(
+        TdApi.AuthenticationCodeType type,
+        string phoneNumber)
+    {
+        return type switch
+        {
+            TdApi.AuthenticationCodeType.AuthenticationCodeTypeTelegramMessage =>
+                "in the Telegram service chat on another logged-in device",
+            TdApi.AuthenticationCodeType.AuthenticationCodeTypeSms =>
+                $"by SMS to {phoneNumber}",
+            TdApi.AuthenticationCodeType.AuthenticationCodeTypeSmsWord =>
+                $"as a word by SMS to {phoneNumber}",
+            TdApi.AuthenticationCodeType.AuthenticationCodeTypeSmsPhrase =>
+                $"as a phrase by SMS to {phoneNumber}",
+            TdApi.AuthenticationCodeType.AuthenticationCodeTypeCall =>
+                $"by a phone call to {phoneNumber}",
+            TdApi.AuthenticationCodeType.AuthenticationCodeTypeMissedCall missedCall =>
+                $"through a missed call to {phoneNumber}; enter the last {missedCall.Length} digits of the caller's number",
+            TdApi.AuthenticationCodeType.AuthenticationCodeTypeFlashCall flashCall =>
+                $"through a flash call to {phoneNumber} from a number matching {flashCall.Pattern}",
+            TdApi.AuthenticationCodeType.AuthenticationCodeTypeFragment fragment =>
+                $"through Fragment at {fragment.Url}",
+            TdApi.AuthenticationCodeType.AuthenticationCodeTypeFirebaseAndroid or
+                TdApi.AuthenticationCodeType.AuthenticationCodeTypeFirebaseIos =>
+                "through a Telegram verification notification",
+            _ => $"to {phoneNumber}"
+        };
     }
 
     private static async Task<AcquiredSessionLock> AcquireLockAsync(SessionConfig config, TimeSpan timeout)
@@ -462,7 +532,7 @@ internal sealed class TelegramSession : IAsyncDisposable
             }
         }
 
-        private static string DefaultRootDirectory()
+        internal static string DefaultRootDirectory()
         {
             var home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
             if (string.IsNullOrWhiteSpace(home))

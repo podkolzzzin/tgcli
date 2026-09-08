@@ -22,10 +22,14 @@
     </PackageReference>
     <PackageReference Include="TDLib" Version="1.8.64.1" />
     <PackageReference Include="tdlib.native" Version="1.8.64.1" />
+    <PackageReference Include="ModelContextProtocol" Version="2.2.0" />
+    <PackageReference Include="Microsoft.Extensions.Hosting" Version="10.0.0" />
+    <PackageReference Include="Tomlyn" Version="0.19.0" />
   </ItemGroup>
 
   <ItemGroup>
     <InternalsVisibleTo Include="TgCli.Tests" />
+    <InternalsVisibleTo Include="TgCli.McpTestServer" />
     <Compile Remove="TgCli.Tests/**/*.cs" />
   </ItemGroup>
 

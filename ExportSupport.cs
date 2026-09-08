@@ -27,7 +27,7 @@ internal static class ChatHistory
 {
     private const int ChannelMessageIdShift = 20;
 
-    public static async Task<HistoryFetchResult> FetchAsync(TelegramSession tg, long chatId, bool all, bool local, int maxPages, bool followMigrations)
+    public static async Task<HistoryFetchResult> FetchAsync(TelegramSession tg, long chatId, bool all, bool local, int maxPages, bool followMigrations, CancellationToken cancellationToken = default)
     {
         var result = new HistoryFetchResult();
         var chain = followMigrations ? await GetMigrationChainAsync(tg, chatId) : [chatId];
@@ -35,6 +35,7 @@ internal static class ChatHistory
 
         foreach (var sourceChatId in chain)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             result.SourceChats.Add(sourceChatId);
             var isChannel = await IsChannelAsync(tg, sourceChatId);
             var cursor = 0L;
@@ -42,6 +43,7 @@ internal static class ChatHistory
             var pageLimit = all ? Math.Max(1, maxPages) : 1;
             for (var page = 0; page < pageLimit; page++)
             {
+                cancellationToken.ThrowIfCancellationRequested();
                 TdApi.Messages history;
                 var attempt = 0;
                 while (true)
@@ -55,7 +57,7 @@ internal static class ChatHistory
                     {
                         result.Retries++;
                         result.Warnings.Add($"Retry {attempt}/2 for chat {sourceChatId} cursor {cursor}: {ex.Message}");
-                        await Task.Delay(TimeSpan.FromMilliseconds(250 * attempt));
+                        await Task.Delay(TimeSpan.FromMilliseconds(250 * attempt), cancellationToken);
                     }
                 }
                 result.PagesFetched++;

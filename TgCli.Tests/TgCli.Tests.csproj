@@ -9,5 +9,7 @@
     <PackageReference Include="xunit.v3" Version="3.2.2" />
     <PackageReference Include="xunit.runner.visualstudio" Version="3.1.5" />
     <ProjectReference Include="../TgCli.csproj" />
+    <ProjectReference Include="McpTestServer/McpTestServer.csproj" ReferenceOutputAssembly="false" />
+    <Compile Remove="McpTestServer/**/*.cs" />
   </ItemGroup>
 </Project>

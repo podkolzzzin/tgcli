@@ -68,9 +68,7 @@ public sealed class TgCommands
     public async Task Search(string query, int limit = 20, bool server = false, string format = "tsv", string? session = null)
     {
         await using var tg = await TelegramSession.CreateReadyAsync(session);
-        var chats = server
-            ? await tg.Client.SearchChatsOnServerAsync(query, ClampLimit(limit, 100))
-            : await tg.Client.SearchChatsAsync(query, ClampLimit(limit, 100));
+        var chats = await TelegramOperations.SearchChatsAsync(tg, query, ClampLimit(limit, 100), server);
 
         await Output.PrintChatsAsync(tg, chats.ChatIds, format);
     }
@@ -886,7 +884,7 @@ public sealed class ChatCommands
     public async Task List(int limit = 50, string format = "tsv", string? session = null)
     {
         await using var tg = await TelegramSession.CreateReadyAsync(session);
-        var chats = await tg.Client.GetChatsAsync(new TdLib.TdApi.ChatList.ChatListMain(), ClampLimit(limit, 1000));
+        var chats = await TelegramOperations.ListChatsAsync(tg, ClampLimit(limit, 1000));
         await Output.PrintChatsAsync(tg, chats.ChatIds, format);
     }
 
@@ -899,8 +897,7 @@ public sealed class ChatCommands
     public async Task Resolve(string username, string format = "tsv", string? session = null)
     {
         await using var tg = await TelegramSession.CreateReadyAsync(session);
-        var normalized = username.Trim().TrimStart('@');
-        var chat = await tg.Client.SearchPublicChatAsync(normalized);
+        var chat = await TelegramOperations.ResolveChatAsync(tg, username);
         await Output.PrintChatAsync(tg, chat, format);
     }
 
@@ -1239,32 +1236,7 @@ public sealed class ChatCommands
         string? session = null)
     {
         await using var tg = await TelegramSession.CreateReadyAsync(session);
-        var window = await tg.Client.GetChatHistoryAsync(
-            chatId,
-            messageId,
-            offset: -Math.Max(0, after),
-            limit: Math.Clamp(before + after + 1, 1, 100),
-            onlyLocal: false);
-        var messages = window.Messages_.ToList();
-        var seen = messages.Select(x => (x.ChatId, x.Id)).ToHashSet();
-        if (followReplyChain)
-        {
-            var current = await tg.Client.GetMessageAsync(chatId, messageId);
-            for (var depth = 0; depth < 100 && current.ReplyTo is TdApi.MessageReplyTo.MessageReplyToMessage reply; depth++)
-            {
-                var replyChatId = ChatHistory.GetLongProperty(reply, "ChatId");
-                if (replyChatId is null or 0) replyChatId = current.ChatId;
-                try
-                {
-                    current = await tg.Client.GetMessageAsync(replyChatId.Value, reply.MessageId);
-                    if (seen.Add((current.ChatId, current.Id))) messages.Add(current);
-                }
-                catch
-                {
-                    break;
-                }
-            }
-        }
+        var messages = await TelegramOperations.ContextAsync(tg, chatId, messageId, before, after, followReplyChain, CancellationToken.None);
 
         var exported = messages.Select(x => new ExportedMessage(x, x.ChatId, x.ChatId, x.Id));
         await Output.WriteExportedMessagesAsync(Console.Out, tg, exported, Output.ParseFormat(format), includeLinks: true);
@@ -1287,54 +1259,7 @@ public sealed class ChatCommands
         CancellationToken cancellationToken = default)
     {
         await using var tg = await TelegramSession.CreateReadyAsync(session, lockTimeout, noWait);
-        if (topicId < 0)
-        {
-            throw new ArgumentException("--topic-id must be zero or greater.", nameof(topicId));
-        }
-        if (topicId > 0 && local)
-        {
-            throw new ArgumentException("--local is not supported with --topic-id.", nameof(local));
-        }
-
-        _ = AttachmentKinds.Parse(type);
-        var topicHistory = topicId > 0
-            ? await ForumTopicHistory.FetchAsync(
-                tg,
-                chatId,
-                topicId,
-                fromMessageId: 0,
-                offset: 0,
-                limit: 100,
-                all: true,
-                maxPages,
-                requestTimeout,
-                cancellationToken)
-            : null;
-        var history = topicId == 0
-            ? await ChatHistory.FetchAsync(tg, chatId, all: true, local, maxPages, followMigrations: true)
-            : null;
-        var messages = topicHistory is not null
-            ? topicHistory.Messages.ToArray()
-            : history!.Messages.Select(x => x.Message).ToArray();
-        var complete = topicHistory?.Complete ?? history!.Complete;
-        var terminationReason = topicHistory?.TerminationReason ?? history!.TerminationReason;
-        var pagesFetched = topicHistory?.PagesFetched ?? history!.PagesFetched;
-        var attachments = AttachmentStatistics.Build(messages, type);
-        var payload = new JObject
-        {
-            ["chat_id"] = chatId,
-            ["topic_id"] = topicId == 0 ? JValue.CreateNull() : topicId,
-            ["count"] = messages.Length,
-            ["count_kind"] = complete ? "exact" : "estimated",
-            ["complete"] = complete,
-            ["termination_reason"] = terminationReason,
-            ["pages_fetched"] = pagesFetched,
-            ["first_timestamp"] = messages.Length == 0 ? JValue.CreateNull() : DateTimeOffset.FromUnixTimeSeconds(messages.Min(x => x.Date)).ToString("O"),
-            ["last_timestamp"] = messages.Length == 0 ? JValue.CreateNull() : DateTimeOffset.FromUnixTimeSeconds(messages.Max(x => x.Date)).ToString("O"),
-            ["participant_count"] = await TryGetParticipantCountAsync(tg, chatId),
-            ["attachments"] = attachments,
-            ["migrations"] = new JArray(history?.SourceChats ?? [chatId])
-        };
+        var payload = await TelegramOperations.StatsAsync(tg, chatId, topicId, type, maxPages, local, requestTimeout, cancellationToken);
 
         Console.WriteLine(format.Trim().ToLowerInvariant() switch
         {
@@ -1456,7 +1381,7 @@ public sealed class ChatCommands
             .ToArray();
     }
 
-    private static IEnumerable<TdApi.Message> FilterMessages(IEnumerable<TdApi.Message> messages, bool serviceOnly, string? kind)
+    internal static IEnumerable<TdApi.Message> FilterMessages(IEnumerable<TdApi.Message> messages, bool serviceOnly, string? kind)
     {
         return messages.Where(message =>
         {
@@ -1490,7 +1415,7 @@ public sealed class ChatCommands
         }
     }
 
-    private static async Task<JToken> TryGetParticipantCountAsync(TelegramSession tg, long chatId)
+    internal static async Task<JToken> TryGetParticipantCountAsync(TelegramSession tg, long chatId)
     {
         try
         {

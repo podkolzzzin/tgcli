@@ -23,6 +23,7 @@ internal static class Program
         app.Add<LinkCommands>("link");
         app.Add<MessageCommands>("message");
         app.Add<SessionCommands>("session");
+        app.Add<McpCommands>("mcp");
 
         app.Run(args);
     }

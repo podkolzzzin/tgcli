@@ -332,7 +332,7 @@ internal static class Output
         }
     }
 
-    private static async Task<ChatRow> BuildChatRowAsync(TelegramSession tg, TdApi.Chat chat)
+    internal static async Task<ChatRow> BuildChatRowAsync(TelegramSession tg, TdApi.Chat chat)
     {
         var username = await MessageLinks.TryGetUsernameAsync(tg, chat.Id) ?? string.Empty;
 

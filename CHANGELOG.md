@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- Add `tgcli mcp` with 12 Telegram read/search/download tools, lazy session initialization, bounded request waits, serialized native operations and stdio-only protocol output.
+- Target MCP `2026-07-28` and retain legacy initialization compatibility, with raw JSON-RPC process tests for both paths.
+- Add `mcp install claude|codex|copilot`, client/profile discovery, dry runs, conflict protection, backups and verification of persisted configuration.
+- Include local adapters for Claude Desktop/Code, shared Codex CLI/Desktop configuration, Copilot CLI, VS Code Stable/Insiders profiles, Visual Studio, JetBrains, Xcode and known Eclipse workspaces. Desktop/IDE runtime verification remains pending; see `MCP.md`.
+- Retain the Telegram database lock until native shutdown completes, including when bounded shutdown waiting expires.
+- Add hermetic published-binary MCP end-to-end tests for protocol negotiation, native CLI registration, Desktop/IDE profile adapters, persisted launch commands, backups and idempotency; run them on Linux, macOS and Windows for pull requests, main and releases.
+
 ## 6.2.0
 
 - Add `tgcli download-batch` to download JSONL message references concurrently through one TDLib client.

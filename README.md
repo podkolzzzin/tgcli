@@ -2,6 +2,26 @@
 
 Small command-line tool for reading Telegram chats with TDLib.
 
+## MCP (unreleased)
+
+The source tree includes a local MCP server and installers for Claude Desktop/Code CLI, Codex Desktop/CLI, and Copilot CLI/IDEs. The v6.2.0 release downloads below predate this feature; build this checkout to use it.
+
+```bash
+tgcli mcp
+tgcli mcp install claude
+tgcli mcp install codex
+tgcli mcp install copilot
+# Inspect proposed changes first, or select another Telegram account:
+tgcli mcp install copilot --dry-run
+tgcli mcp install claude --session /absolute/path/to/session
+```
+
+MCP `2026-07-28` uses per-request metadata without a handshake; older clients can still initialize with `2025-11-25`, `2025-06-18`, or `2024-11-05`. Twelve tools expose Telegram reading, search, context, statistics, links, diagnostics and attachment downloads. Login separately with `tgcli login` before using Telegram tools. An MCP process retains its session lock, so stop it before another client uses the same Telegram database.
+
+See [MCP.md](MCP.md) for the client/OS matrix, detection rules, tools, configuration, verification, removal, and known limitations. The [implementation plan](MCP_PLAN.md) retains the outstanding acceptance checks; Desktop/IDE interoperability is not yet fully verified.
+
+Pull requests and main-branch changes run published-binary MCP end-to-end tests on Linux, macOS and Windows. The tests use isolated client profiles and fake native registration launchers, then start the server from a persisted Desktop configuration; they never modify a developer's real client settings or require Telegram credentials.
+
 ## Install
 
 Linux:

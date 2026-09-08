@@ -1,0 +1,64 @@
+name: e2e
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  mcp:
+    name: MCP ${{ matrix.rid }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            rid: linux-x64
+            binary: tgcli
+          - os: macos-latest
+            rid: osx-x64
+            binary: tgcli
+          - os: windows-latest
+            rid: win-x64
+            binary: tgcli.exe
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Restore
+        run: dotnet restore TgCli.Tests/TgCli.Tests.csproj
+
+      - name: Unit and protocol tests
+        run: dotnet test TgCli.Tests/TgCli.Tests.csproj -c Release --no-restore
+
+      - name: Publish application
+        shell: bash
+        run: |
+          dotnet publish TgCli.csproj \
+            -c Release \
+            -r "${{ matrix.rid }}" \
+            --self-contained true \
+            -p:PublishSingleFile=true \
+            -p:IncludeNativeLibrariesForSelfExtract=true \
+            -o "artifacts/${{ matrix.rid }}"
+
+      - name: MCP end-to-end tests
+        shell: bash
+        run: python tools/e2e_mcp.py "artifacts/${{ matrix.rid }}/${{ matrix.binary }}"

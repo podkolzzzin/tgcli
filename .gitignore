@@ -14,3 +14,7 @@ config.json
 # Release output
 artifacts/
 publish/
+
+# Python test caches
+__pycache__/
+*.pyc
