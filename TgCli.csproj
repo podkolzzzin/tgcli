@@ -1,9 +1,9 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
     <OutputType>Exe</OutputType>
     <TargetFramework>net10.0</TargetFramework>
-    <Version>6.3.0</Version>
+    <Version>7.0.0</Version>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <AssemblyName>tgcli</AssemblyName>
@@ -15,11 +15,28 @@
     <DebugSymbols>false</DebugSymbols>
   </PropertyGroup>
 
+  <PropertyGroup>
+    <TranscriptionRid Condition="'$(RuntimeIdentifier)' != ''">$(RuntimeIdentifier)</TranscriptionRid>
+    <TranscriptionRid Condition="'$(TranscriptionRid)' == ''">$(NETCoreSdkRuntimeIdentifier)</TranscriptionRid>
+    <TranscriptionAssetsDir>$(MSBuildProjectDirectory)/.transcription</TranscriptionAssetsDir>
+  </PropertyGroup>
+  <ItemGroup>
+    <EmbeddedResource Include="$(TranscriptionAssetsDir)/model.bin" LogicalName="TgCli.Transcription.Model" Condition="Exists('$(TranscriptionAssetsDir)/model.bin')" />
+    <EmbeddedResource Include="$(TranscriptionAssetsDir)/$(TranscriptionRid)/**/*" LogicalName="TgCli.Transcription.Assets.%(RecursiveDir)%(Filename)%(Extension)" />
+  </ItemGroup>
+  <Target Name="RequireEmbeddedTranscriptionAssets" BeforeTargets="PrepareForPublish">
+    <Error Condition="!Exists('$(TranscriptionAssetsDir)/model.bin') Or !Exists('$(TranscriptionAssetsDir)/$(TranscriptionRid)/manifest.json')"
+           Text="Prepare embedded model/decoder/runtime before publishing: python tools/prepare_transcription.py --rid $(TranscriptionRid) (after dotnet restore)." />
+  </Target>
+
   <ItemGroup>
     <PackageReference Include="ConsoleAppFramework" Version="5.7.13">
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
       <PrivateAssets>all</PrivateAssets>
     </PackageReference>
+    <PackageReference Include="Whisper.net" Version="1.9.1" />
+    <PackageReference Include="Whisper.net.Runtime" Version="1.9.1" ExcludeAssets="all" />
+    <PackageReference Include="Whisper.net.Runtime.NoAvx" Version="1.9.1" ExcludeAssets="all" />
     <PackageReference Include="TDLib" Version="1.8.64.1" />
     <PackageReference Include="tdlib.native" Version="1.8.64.1" />
     <PackageReference Include="ModelContextProtocol" Version="2.2.0" />

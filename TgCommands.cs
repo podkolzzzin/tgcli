@@ -9,6 +9,19 @@ namespace TgCli;
 public sealed class TgCommands
 {
     /// <summary>
+    /// Transcribe a local audio or video file using the embedded multilingual Whisper model.
+    /// </summary>
+    /// <param name="input">Local audio/video path (WAV, OGG, MP3, M4A, MP4 and other FFmpeg formats).</param>
+    /// <param name="language">Speech language code, for example uk or en; auto detects the language.</param>
+    /// <param name="format">Output format: json (with timestamped segments), jsonl or plain.</param>
+    public async Task Transcribe(string input, string language = "auto", string format = "json", CancellationToken cancellationToken = default)
+    {
+        TranscriptionCommands.ValidateFormat(format);
+        await using var transcription = TranscriptionCommands.Create(true, language)!;
+        TranscriptionCommands.Write(await transcription.TranscribeFileAsync(input, cancellationToken), format);
+    }
+
+    /// <summary>
     /// Print machine-readable session, TDLib, account, database, and network diagnostics.
     /// </summary>
     public async Task Diagnostics(string format = "json", int lockTimeout = 5, bool noWait = false, string? session = null)
@@ -445,6 +458,25 @@ public sealed class LinkCommands
 
 public sealed class MessageCommands
 {
+    /// <summary>
+    /// Download and transcribe a Telegram voice note, video note, audio or video attachment locally.
+    /// </summary>
+    /// <param name="chatId">Chat id containing the media message.</param>
+    /// <param name="messageId">TDLib message id.</param>
+    /// <param name="language">Speech language code, for example uk or en; auto detects the language.</param>
+    /// <param name="format">Output format: json, jsonl or plain.</param>
+    /// <param name="session">Session directory. Defaults to ~/.local/share/tgcli.</param>
+    public async Task Transcribe(long chatId, long messageId, string language = "auto", string format = "json", string? session = null, CancellationToken cancellationToken = default)
+    {
+        TranscriptionCommands.ValidateFormat(format);
+        await using var transcription = TranscriptionCommands.Create(true, language)!;
+        await using var tg = await TelegramSession.CreateReadyAsync(session);
+        var message = await tg.Client.GetMessageAsync(chatId, messageId).WaitAsync(cancellationToken);
+        var file = MediaTranscription.GetMedia(message);
+        var path = await MediaTranscription.DownloadAsync(tg, file, cancellationToken);
+        TranscriptionCommands.Write(await transcription.TranscribeFileAsync(path, cancellationToken), format, chatId, messageId);
+    }
+
     /// <summary>
     /// Get one full message as JSON, including extracted files and links.
     /// </summary>
@@ -1098,7 +1130,7 @@ public sealed class ChatCommands
     }
 
     /// <summary>
-    /// Export chat history to Markdown, JSONL, or TSV.
+    /// Export chat history to Markdown, JSONL, or TSV; add --transcribe for embedded speech-to-text.
     /// </summary>
     /// <param name="chatId">Chat id from tgcli chat list/search/resolve.</param>
     /// <param name="output">Destination file, or - for stdout.</param>
@@ -1108,6 +1140,9 @@ public sealed class ChatCommands
     /// <param name="local">Read local database only.</param>
     /// <param name="includeLinks">Include tg:// and https links for each exported message.</param>
     /// <param name="session">Session directory. Defaults to ~/.local/share/tgcli.</param>
+    /// <param name="transcribe">Transcribe voice notes, video notes, audio and video with the embedded model.</param>
+    /// <param name="transcribeLanguage">Speech language code, or auto.</param>
+    /// <param name="transcribeCommand">Optional external transcription executable, mutually exclusive with --transcribe.</param>
     public async Task Export(
         long chatId,
         string output = "-",
@@ -1124,15 +1159,19 @@ public sealed class ChatCommands
         string? resumeToken = null,
         string? fields = null,
         string? transcribeCommand = null,
+        bool transcribe = false,
+        string transcribeLanguage = "auto",
         string? expectSince = null,
         int expectCountMin = 0,
         bool failIncomplete = false,
-        string? session = null)
+        string? session = null,
+        CancellationToken cancellationToken = default)
     {
+        await using var transcription = TranscriptionCommands.Create(transcribe, transcribeLanguage, transcribeCommand);
         await using var tg = await TelegramSession.CreateReadyAsync(session);
-        var chat = await tg.Client.GetChatAsync(chatId);
+        var chat = await tg.Client.GetChatAsync(chatId).WaitAsync(cancellationToken);
         all = all || allHistory;
-        var history = await ChatHistory.FetchAsync(tg, chatId, all, local, maxPages, followMigrations: all);
+        var history = await ChatHistory.FetchAsync(tg, chatId, all, local, maxPages, followMigrations: all, cancellationToken: cancellationToken);
         var sinceTimestamp = string.IsNullOrWhiteSpace(sinceDate)
             ? (DateTimeOffset?)null
             : DateTimeOffset.Parse(sinceDate, CultureInfo.InvariantCulture);
@@ -1160,7 +1199,7 @@ public sealed class ChatCommands
         var parsedFormat = Output.ParseFormat(format);
         if (output == "-")
         {
-            await Output.WriteExportedMessagesAsync(Console.Out, tg, history.Messages, parsedFormat, chat.Title, includeLinks, fields, transcribeCommand);
+            await Output.WriteExportedMessagesAsync(Console.Out, tg, history.Messages, parsedFormat, chat.Title, includeLinks, fields, transcription, cancellationToken);
             return;
         }
 
@@ -1198,7 +1237,7 @@ public sealed class ChatCommands
             {
                 foreach (var line in File.ReadLines(fullPath)) await stream.WriteLineAsync(line);
             }
-            await Output.WriteExportedMessagesAsync(stream, tg, history.Messages, parsedFormat, resume || incremental ? null : chat.Title, includeLinks, fields, transcribeCommand);
+            await Output.WriteExportedMessagesAsync(stream, tg, history.Messages, parsedFormat, resume || incremental ? null : chat.Title, includeLinks, fields, transcription, cancellationToken);
             foreach (var key in deletedKeys)
             {
                 await stream.WriteLineAsync(ExportSchema.Tombstone(key.ChatId, key.MessageId).ToString(Formatting.None));

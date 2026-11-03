@@ -131,7 +131,8 @@ internal static class Output
         string? title = null,
         bool includeLinks = false,
         string? fields = null,
-        string? transcribeCommand = null)
+        MediaTranscription? transcription = null,
+        CancellationToken cancellationToken = default)
     {
         if (format is OutputFormat.Jsonl or OutputFormat.Json)
         {
@@ -139,7 +140,7 @@ internal static class Output
             foreach (var item in messages.OrderBy(x => x.Message.Date).ThenBy(x => x.Message.Id))
             {
                 objects.Add(SelectFields(
-                    await ExportSchema.BuildMessageAsync(tg, item, includeLinks, transcribeCommand),
+                    await ExportSchema.BuildMessageAsync(tg, item, includeLinks, transcription, cancellationToken),
                     fields));
             }
 
@@ -157,10 +158,16 @@ internal static class Output
         var rows = new List<MessageRow>();
         foreach (var item in messages.OrderBy(x => x.Message.Id))
         {
-            rows.Add((await BuildMessageRowAsync(tg, item.Message, null, includeLinks)) with
+            cancellationToken.ThrowIfCancellationRequested();
+            var row = await BuildMessageRowAsync(tg, item.Message, null, includeLinks);
+            var primary = MessageFiles.GetPrimaryAttachment(item.Message.Content);
+            var transcript = primary is null ? null : await MediaTranscription.TranscribeAttachmentAsync(
+                primary, transcription, f => MediaTranscription.DownloadAsync(tg, f, cancellationToken), cancellationToken);
+            rows.Add(row with
             {
                 OriginalChatId = item.OriginalChatId,
-                OriginalMessageId = item.OriginalMessageId
+                OriginalMessageId = item.OriginalMessageId,
+                Text = transcript is null ? row.Text : MediaTranscription.AppendToCaption(row.Text, transcript)
             });
         }
 

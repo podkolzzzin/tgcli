@@ -1,4 +1,3 @@
-using System.Diagnostics;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using TdLib;
@@ -14,7 +13,8 @@ internal static class ExportSchema
         TelegramSession tg,
         ExportedMessage item,
         bool includeLinks,
-        string? transcribeCommand = null)
+        MediaTranscription? transcription = null,
+        CancellationToken cancellationToken = default)
     {
         var message = item.Message;
         var sender = await ResolveSenderAsync(tg, message.SenderId);
@@ -23,9 +23,12 @@ internal static class ExportSchema
         var links = includeLinks ? await MessageLinks.BuildAsync(tg, message.ChatId, message.Id) : null;
         var files = new JArray();
 
+        var primary = MessageFiles.GetPrimaryAttachment(message.Content);
         foreach (var file in MessageFiles.GetAllFiles(message))
         {
-            var generatedText = await TryTranscribeAsync(tg, file, transcribeCommand);
+            var generatedText = primary?.FileId == file.FileId
+                ? await MediaTranscription.TranscribeAttachmentAsync(primary, transcription, f => MediaTranscription.DownloadAsync(tg, f, cancellationToken), cancellationToken)
+                : null;
             files.Add(ToAttachmentJson(file, MessageFiles.GetMessageText(message.Content), generatedText));
         }
 
@@ -204,7 +207,7 @@ internal static class ExportSchema
         }
     }
 
-    private static JObject ToAttachmentJson(MessageFile file, string caption, string? generatedText)
+    internal static JObject ToAttachmentJson(MessageFile file, string caption, MediaTranscript? generatedText)
     {
         var local = file.File.Local;
         return new JObject
@@ -225,50 +228,8 @@ internal static class ExportSchema
                 local.IsDownloadingActive ? "downloading" :
                 local.CanBeDownloaded ? "available" : "unavailable",
             ["local_path"] = local?.IsDownloadingCompleted == true ? local.Path : JValue.CreateNull(),
-            ["generated_text"] = generatedText is null ? JValue.CreateNull() : new JObject
-            {
-                ["kind"] = "transcription",
-                ["generated"] = true,
-                ["text"] = generatedText
-            }
+            ["generated_text"] = generatedText?.ToJson() ?? (JToken)JValue.CreateNull()
         };
-    }
-
-    private static async Task<string?> TryTranscribeAsync(TelegramSession tg, MessageFile file, string? command)
-    {
-        if (string.IsNullOrWhiteSpace(command) || file.Kind is not ("voice" or "video-note"))
-        {
-            return null;
-        }
-
-        var downloaded = file.File.Local?.IsDownloadingCompleted == true
-            ? file.File
-            : await tg.Client.DownloadFileAsync(file.FileId, 32, 0, 0, synchronous: true);
-        if (string.IsNullOrWhiteSpace(downloaded.Local?.Path))
-        {
-            return null;
-        }
-
-        var parts = command.Split(' ', 2, StringSplitOptions.RemoveEmptyEntries);
-        var info = new ProcessStartInfo(parts[0])
-        {
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            UseShellExecute = false
-        };
-        if (parts.Length == 2)
-        {
-            info.ArgumentList.Add(parts[1]);
-        }
-        info.ArgumentList.Add(downloaded.Local.Path);
-        using var process = Process.Start(info) ?? throw new InvalidOperationException($"Unable to start transcription command '{parts[0]}'.");
-        var output = await process.StandardOutput.ReadToEndAsync();
-        await process.WaitForExitAsync();
-        if (process.ExitCode != 0)
-        {
-            throw new InvalidOperationException($"Transcription command exited with code {process.ExitCode}: {await process.StandardError.ReadToEndAsync()}");
-        }
-        return output.Trim();
     }
 
     private static JToken ExtractEntities(TdApi.MessageContent? content)

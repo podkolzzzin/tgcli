@@ -5,7 +5,7 @@ description: Use this project-scoped skill when Codex needs to inspect Telegram 
 
 # tgcli
 
-Use `tgcli --help` or `<command> --help` if flags may have changed. For one or a few Telegram voice/video messages, use `tgcli message transcribe --chat-id <id> --message-id <id> --format json` directly before considering manual downloads or another speech recognizer. Prefer v6.4+ commands for concurrent batch downloads, forum-topic history and attachment totals, BotFather-backed bot management, bot chat interaction, the versioned rich export schema, channel-aware pagination, integrity manifests, channel metrics/comments, incremental caches, diagnostics, and conversation context.
+Use `tgcli --help` or `<command> --help` if flags may have changed. For one or a few Telegram voice/video messages, use `tgcli message transcribe --chat-id <id> --message-id <id> --format json` directly before considering manual downloads or another speech recognizer. Prefer v7.0+ commands for concurrent batch downloads, forum-topic history and attachment totals, BotFather-backed bot management, bot chat interaction, the versioned rich export schema, channel-aware pagination, integrity manifests, channel metrics/comments, incremental caches, diagnostics, and conversation context.
 
 Core flow:
 
@@ -104,7 +104,7 @@ MCP (v6.3+):
 - An MCP process keeps its Telegram session lock after the first Telegram call. Close that connection before another client/CLI uses the same database, or use an independently authorized session. Request cancellation does not release a gate held by unfinished native work.
 
 
-Embedded transcription (v6.4+):
+Embedded transcription (v7.0+):
 
 - For a Telegram attachment, use `tgcli message transcribe --chat-id <id> --message-id <tdlib-id> --format json`. Voice notes, video notes, full audio and full video are supported. It downloads only the primary media, not thumbnails.
 - For an existing local file, use `tgcli transcribe --input <path> --language auto --format json|plain`; no Telegram authorization is needed.

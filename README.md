@@ -4,7 +4,7 @@ Small command-line tool for reading Telegram chats with TDLib.
 
 ## MCP
 
-Version 6.3.0 includes a local MCP server and installers for Claude Desktop/Code CLI, Codex Desktop/CLI, and Copilot CLI/IDEs.
+Version 7.0.0 adds offline audio/video transcription with a multilingual Whisper model embedded in the binary, alongside the local MCP server and client installers.
 
 ```bash
 tgcli mcp
@@ -27,19 +27,19 @@ Pull requests and main-branch changes run published-binary MCP end-to-end tests 
 Linux:
 
 ```bash
-sudo curl -L https://github.com/podkolzzzin/tgcli/releases/download/v6.3.0/tgcli-linux-x64 -o /usr/local/bin/tgcli && sudo chmod +x /usr/local/bin/tgcli
+sudo curl -L https://github.com/podkolzzzin/tgcli/releases/download/v7.0.0/tgcli-linux-x64 -o /usr/local/bin/tgcli && sudo chmod +x /usr/local/bin/tgcli
 ```
 
 Windows PowerShell, as Administrator:
 
 ```powershell
-New-Item -ItemType Directory -Force "$env:ProgramFiles\tgcli" | Out-Null; Invoke-WebRequest "https://github.com/podkolzzzin/tgcli/releases/download/v6.3.0/tgcli-win-x64.exe" -OutFile "$env:ProgramFiles\tgcli\tgcli.exe"; [Environment]::SetEnvironmentVariable("Path", [Environment]::GetEnvironmentVariable("Path", "Machine") + ";$env:ProgramFiles\tgcli", "Machine")
+New-Item -ItemType Directory -Force "$env:ProgramFiles\tgcli" | Out-Null; Invoke-WebRequest "https://github.com/podkolzzzin/tgcli/releases/download/v7.0.0/tgcli-win-x64.exe" -OutFile "$env:ProgramFiles\tgcli\tgcli.exe"; [Environment]::SetEnvironmentVariable("Path", [Environment]::GetEnvironmentVariable("Path", "Machine") + ";$env:ProgramFiles\tgcli", "Machine")
 ```
 
 macOS:
 
 ```bash
-sudo curl -L https://github.com/podkolzzzin/tgcli/releases/download/v6.3.0/tgcli-osx-x64 -o /usr/local/bin/tgcli && sudo chmod +x /usr/local/bin/tgcli
+sudo curl -L https://github.com/podkolzzzin/tgcli/releases/download/v7.0.0/tgcli-osx-x64 -o /usr/local/bin/tgcli && sudo chmod +x /usr/local/bin/tgcli
 ```
 
 Then open a new terminal and run:
@@ -117,7 +117,7 @@ JSONL exports use the versioned `tgcli.message/5.0` schema. Each record includes
 
 `--all-history` follows basic-group to supergroup migrations and produces one chronological, deduplicated stream. For channels, it also probes older public post ids when TDLib returns short history pages. A sibling `<output>.manifest.json` records source chats, boundaries, public id range, missing public ids, per-chat and total page counts, retries, gaps, inaccessible messages, duplicates, termination reason, completeness, counts, and a resume token. Fresh writes and manifest updates are atomic.
 
-Use `--fields chat_id,message_id,text` for a stable projection. Use `--since-message-id`, `--since-date`, or `--resume-token` to limit a later export. `--resume` deduplicates an existing JSONL cache; `--incremental` also emits deletion tombstones after a complete refresh. `--transcribe-command <executable>` passes each downloaded voice/video-note path as the final argument and labels stdout as generated transcription text.
+Use `--fields chat_id,message_id,text` for a stable projection. Use `--since-message-id`, `--since-date`, or `--resume-token` to limit a later export. `--resume` deduplicates an existing JSONL cache; `--incremental` also emits deletion tombstones after a complete refresh. `--transcribe` runs the embedded model for voice notes, video notes, audio and video; `--transcribe-language uk` selects Ukrainian instead of automatic language detection. Transcripts remain separate from captions in `attachments[].generated_text` and include model, detected language and timestamped segments. Markdown, plain and TSV exports append an explicit generated-transcription block. The compatible `--transcribe-command <executable>` option uses an external command for the same four media kinds; it cannot be combined with `--transcribe`.
 
 `channel metrics` emits one row per post with views, forwards, replies, reactions, paid reactions, link domains, and engagement rate. `channel comments` resolves Telegram discussion threads and includes `channel_post_id`, `discussion_chat_id`, and `discussion_message_id` for each exported row.
 
@@ -181,3 +181,32 @@ Session-backed commands use a lock file in the session directory, normally `~/.l
 Use `tgcli session status` to inspect a lock without opening Telegram. `tgcli session unlock --stale-only` removes stale owner metadata only when the operating-system lock is free; it refuses to override an active process. Failed initialization and readiness paths now dispose their sessions, TDLib shutdown is bounded, and normal shutdown removes its owner metadata.
 
 This project is unofficial and is not affiliated with Telegram.
+
+
+## Offline media transcription
+
+```bash
+# Local files need no Telegram login. Default JSON includes text and segments in seconds.
+tgcli transcribe --input ./lecture.mp4 --language uk
+tgcli transcribe --input ./recording.ogg --format plain
+
+# Voice notes, video notes, full audio and full video use the same embedded engine.
+tgcli message transcribe --chat-id <id> --message-id <tdlib-message-id> --language uk
+
+tgcli chat export --chat-id <id> --format jsonl --output history.jsonl --transcribe
+tgcli chat export --chat-id <id> --format md --output history.md --transcribe --transcribe-language uk
+```
+
+Transcription is opt-in and runs on the CPU in the tgcli process through Whisper.net. The multilingual Whisper base weights (148 MB before executable compression), native CPU runtime and FFmpeg decoder are embedded in release binaries. No Python, model download, separate FFmpeg installation or external speech service is needed at runtime. .NET extracts the bundled decoder/native libraries into the user's local tgcli transcription cache on first use and verifies checksums; model weights are loaded from the binary into memory. FFmpeg runs only to decode media, while model inference runs inside tgcli. Audio without speech may produce an empty transcript; a video without an audio track is an error. Recognition quality depends on the recording and the base model; generated transcripts are labeled accordingly.
+
+Source builds require build-time internet access and Python to prepare the pinned assets after NuGet restore:
+
+```bash
+dotnet restore TgCli.Tests/TgCli.Tests.csproj
+python3 tools/prepare_transcription.py --rid linux-x64
+# Use win-x64 or osx-x64 when publishing those supported targets.
+dotnet test TgCli.Tests/TgCli.Tests.csproj -c Release
+dotnet publish TgCli.csproj -c Release -r linux-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o artifacts/linux-x64
+```
+
+Normal development builds can omit the large assets, but transcription then reports how to prepare them. Publishing refuses to create a release without the embedded assets. Downloads are pinned to model revision/wheel hashes in `tools/prepare_transcription.py`. See `third_party/transcription/NOTICE.md` for component licenses and sources; notices are also embedded and extracted with the decoder.
