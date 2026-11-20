@@ -4,9 +4,7 @@ Small command-line tool for reading Telegram chats with TDLib.
 
 ## MCP
 
-Version 7.0.1 fixes stale reads at startup: online commands wait up to 30 seconds for TDLib's connection/update synchronization, and fail explicitly if it cannot finish. Authorization restored from disk is not proof of a current connection. `--local` still reads the cache without this wait. MCP rechecks connection readiness before each online operation, including after reconnects. Diagnostics reports the observed connection state. Exports continue across short TDLib history pages until an empty page or an explicit safety bound; a short page alone is not proof that history is complete.
-
-Version 7.0.0 added offline audio/video transcription with a multilingual Whisper model embedded in the binary, alongside the local MCP server and client installers.
+Version 8.0.0 updates the CLI and MCP read contracts, export snapshots, and release installation. See the [v8 migration guide](docs/v8-migration.md) before updating scripts or existing exports.
 
 ```bash
 tgcli mcp
@@ -22,33 +20,50 @@ MCP `2026-07-28` uses per-request metadata without a handshake; older clients ca
 
 See [MCP.md](MCP.md) for the client/OS matrix, detection rules, tools, configuration, verification, removal, and known limitations. The [implementation plan](MCP_PLAN.md) retains the outstanding acceptance checks; Desktop/IDE interoperability is not yet fully verified.
 
-Pull requests and main-branch changes run published-binary MCP end-to-end tests on Linux, macOS and Windows. The tests use isolated client profiles and fake native registration launchers, then start the server from a persisted Desktop configuration; they never modify a developer's real client settings or require Telegram credentials.
+Pull requests, main-branch changes, and releases run the same packaged CLI, installer, local transcription, and MCP checks on Linux x64, macOS Intel, and Windows x64. MCP checks use isolated profiles and simulated client launchers.
 
 ## Install
 
-Linux:
+<!-- install:start -->
+On Linux and macOS, use Python 3.11 or later, `curl`, and `sudo`. On Windows, use x64 Python 3.13 or later for private staging, and open PowerShell as Administrator.
+
+Linux x64
 
 ```bash
-sudo curl -L https://github.com/podkolzzzin/tgcli/releases/download/v7.0.0/tgcli-linux-x64 -o /usr/local/bin/tgcli && sudo chmod +x /usr/local/bin/tgcli
+(
+  installer=$(mktemp "${TMPDIR:-/tmp}/tgcli-install.XXXXXXXXXX") || exit
+  trap 'rm -f "$installer"' EXIT
+  curl -fsSL --proto '=https' --proto-redir '=https' -o "$installer" "https://raw.githubusercontent.com/podkolzzzin/tgcli/v8.0.0/tools/install.py" &&
+    sudo python3 -I "$installer" --tag v8.0.0 --rid linux-x64 --destination /usr/local/bin/tgcli
+)
 ```
 
-Windows PowerShell, as Administrator:
+Windows x64
 
 ```powershell
-New-Item -ItemType Directory -Force "$env:ProgramFiles\tgcli" | Out-Null; Invoke-WebRequest "https://github.com/podkolzzzin/tgcli/releases/download/v7.0.0/tgcli-win-x64.exe" -OutFile "$env:ProgramFiles\tgcli\tgcli.exe"; [Environment]::SetEnvironmentVariable("Path", [Environment]::GetEnvironmentVariable("Path", "Machine") + ";$env:ProgramFiles\tgcli", "Machine")
+$installer = Join-Path ([IO.Path]::GetTempPath()) ("tgcli-install-" + [Guid]::NewGuid() + ".py")
+try {
+  Invoke-WebRequest -UseBasicParsing -ErrorAction Stop -Uri "https://raw.githubusercontent.com/podkolzzzin/tgcli/v8.0.0/tools/install.py" -OutFile $installer
+  py -3 -I $installer --tag v8.0.0 --rid win-x64 --destination "$env:ProgramFiles\tgcli\tgcli.exe"
+  if ($LASTEXITCODE -ne 0) { throw "tgcli installation failed" }
+} finally {
+  Remove-Item -LiteralPath $installer -ErrorAction SilentlyContinue
+}
 ```
 
-macOS:
+macOS Intel
 
 ```bash
-sudo curl -L https://github.com/podkolzzzin/tgcli/releases/download/v7.0.0/tgcli-osx-x64 -o /usr/local/bin/tgcli && sudo chmod +x /usr/local/bin/tgcli
+(
+  installer=$(mktemp "${TMPDIR:-/tmp}/tgcli-install.XXXXXXXXXX") || exit
+  trap 'rm -f "$installer"' EXIT
+  curl -fsSL --proto '=https' --proto-redir '=https' -o "$installer" "https://raw.githubusercontent.com/podkolzzzin/tgcli/v8.0.0/tools/install.py" &&
+    sudo python3 -I "$installer" --tag v8.0.0 --rid osx-x64 --destination /usr/local/bin/tgcli
+)
 ```
 
-Then open a new terminal and run:
-
-```bash
-tgcli --help
-```
+The installer checks SHA-256, version, and help output before replacing the executable. A failed update preserves the previous installation. Stop any running tgcli or MCP process before updating. On Windows, invoke `& "$env:ProgramFiles\tgcli\tgcli.exe" --version` or add its directory to `Path`. On Linux and macOS, run `tgcli --version` from your usual shell.
+<!-- install:end -->
 
 ## Agent Skill
 
@@ -78,14 +93,14 @@ You only need to login once. The local Telegram session is stored on your machin
 
 ```bash
 tgcli chat list
-tgcli search "some chat"
+tgcli search --query "some chat"
 tgcli chat messages --chat-id 123456789
 tgcli forum topics --chat-id 123456789 --all
 tgcli chat messages --chat-id 123456789 --topic-id 10 --all
 tgcli chat search --chat-id 123456789 --topic-id 10 --type video --all
 tgcli chat stats --chat-id 123456789 --topic-id 10 --type video
 tgcli chat export --chat-id 123456789 --format md --output chat.md
-tgcli chat export --chat-id 123456789 --all-history --format jsonl --output chat.jsonl --fail-incomplete
+tgcli chat export --chat-id 123456789 --format jsonl --output chat.jsonl
 tgcli channel metrics --chat-id 123456789 --format json
 tgcli channel comments --chat-id 123456789 --post-id 42 --format jsonl
 tgcli session export > tgcli.session
@@ -104,7 +119,7 @@ tgcli bot remove --username example_unique_bot --confirm
 
 `download --output` accepts either a file or directory. Existing directories, paths ending with a path separator, and missing paths without an extension are treated as directories.
 
-`download-batch` accepts JSONL with integer `chat_id` and `message_id` fields, including rows produced by filtered `chat search`, `chat messages`, or `chat export` commands. It downloads through one TDLib client with bounded concurrency and writes one result row per input row:
+`download-batch` accepts JSONL with decimal string `chat_id` and `message_id` fields, including rows produced by filtered `chat search`, `chat messages`, or `chat export` commands. It downloads through one TDLib client with bounded concurrency and writes one result row per input row:
 
 ```bash
 tgcli chat search --chat-id 123456789 --query "" --type video --all --format jsonl > videos.jsonl
@@ -115,11 +130,11 @@ Use `--input -` to read JSONL from stdin. Output filenames include the chat and 
 
 ## Export schema and completeness
 
-JSONL exports use the versioned `tgcli.message/5.0` schema. Each record includes stable sender ids and separate display-name/username fields; source chat and message ids; top-level `short_message_id` and `tg_url`; resolved reply chat/message ids and a target preview; edit time; forwarding origin; channel metrics; polls; structured entities and service events; and complete attachment metadata. Telegram history does not return deleted message bodies. A complete `--incremental` refresh emits explicit tombstones for records that disappeared from the current history.
+Message records in JSON and JSONL have `schema` set to `tgcli.message` and `schema_version` set to `8.0`. They include source chat and message IDs, links, sender identity, reply and forwarding context, edits, metrics, polls, service events, and attachment metadata. JSON command output is one document. JSONL output contains one data record per line. Message lists sort chronologically by date, chat ID, and message ID.
 
-`--all-history` follows basic-group to supergroup migrations and produces one chronological, deduplicated stream. For channels, it also probes older public post ids when TDLib returns short history pages. A sibling `<output>.manifest.json` records source chats, boundaries, public id range, missing public ids, per-chat and total page counts, retries, gaps, inaccessible messages, duplicates, termination reason, completeness, counts, and a resume token. Fresh writes and manifest updates are atomic.
+`chat export` defaults to complete current history, including migrated history when present. Use `--limit N` to request a bounded export. Check the exit code and the sibling `<output>.manifest.json` for the acquisition scope, coverage and termination reason. A complete refresh validates the scope and reconciles message edits and deletions. For an older export schema, create a fresh v8 snapshot before refreshing. See the [migration guide](docs/v8-migration.md) for refresh and resume examples.
 
-Use `--fields chat_id,message_id,text` for a stable projection. Use `--since-message-id`, `--since-date`, or `--resume-token` to limit a later export. `--resume` deduplicates an existing JSONL cache; `--incremental` also emits deletion tombstones after a complete refresh. `--transcribe` runs the embedded model for voice notes, video notes, audio and video; `--transcribe-language uk` selects Ukrainian instead of automatic language detection. Transcripts remain separate from captions in `attachments[].generated_text` and include model, detected language and timestamped segments. Markdown, plain and TSV exports append an explicit generated-transcription block. The compatible `--transcribe-command <executable>` option uses an external command for the same four media kinds; it cannot be combined with `--transcribe`.
+Use `--transcribe` to generate transcripts for voice notes, video notes, audio and video. Set `--transcribe-language uk` to select Ukrainian. Transcripts include the model, detected language and timestamped segments in `attachments[].generated_text`. Markdown, plain and TSV exports include a generated-transcription block. The `--transcribe-command <executable>` option uses an external command for the same media kinds. Use either transcription option per invocation.
 
 `channel metrics` emits one row per post with views, forwards, replies, reactions, paid reactions, link domains, and engagement rate. `channel comments` resolves Telegram discussion threads and includes `channel_post_id`, `discussion_chat_id`, and `discussion_message_id` for each exported row.
 
@@ -167,6 +182,7 @@ The secret contains only `config.json` and TDLib's `tdlib-db/td.binlog` authoriz
 
 ## ID semantics
 
+- JSON and JSONL represent Telegram IDs, including topic and file IDs, as decimal strings. Counts, byte sizes, and Unix seconds are numbers. Timestamp strings and date-only selectors use UTC.
 - `chat_id` is the TDLib chat containing the record. It remains the original source chat id across migrations.
 - `message_id` is TDLib's 64-bit message id and is only unique within its chat.
 - `short_message_id` is `message_id >> 20`, used in Telegram links; do not substitute it for `message_id` in API calls.
@@ -174,11 +190,27 @@ The secret contains only `config.json` and TDLib's `tdlib-db/td.binlog` authoriz
 - `reply_to_chat_id` must be paired with `reply_to_message_id`; replies can cross the fetched page or migration boundary.
 - Exact HTTPS permalinks exist only where Telegram exposes a public/private-supergroup link. `tg_url` is the general client deep link.
 
-## Notes
+## Read scope and exit codes
+
+Discovery and reads sync with Telegram by default. Commands that accept `--local` use the cache throughout and report `source=local_cache`. Inspect acquisition metadata for source exhaustion and continuation. For JSON collections the metadata is in the document. For scoped streamed output such as JSONL or TSV, read the result summary on stderr. File exports put acquisition metadata in their manifest.
+
+| Exit code | Meaning |
+|---|---|
+| 0 | Request fulfilled, including a bounded page or an authoritatively empty result |
+| 1 | Operational failure |
+| 2 | Invalid usage or input |
+| 3 | Partial result |
+| 4 | Log in or restore authorization |
+| 5 | Request deadline exceeded |
+| 130 | Cancelled |
+
+Most Telegram operations accept `--request-timeout` in seconds. The default is 60 seconds, covering lock acquisition, readiness, and the operation itself. `--lock-timeout` can reduce the time spent waiting for the session lock. `--no-wait` tries to acquire the lock immediately.
+
+## Session storage
 
 Keep your session directory private. It contains Telegram login data.
 
-Session-backed commands use a lock file in the session directory, normally `~/.local/share/tgcli/tdlib.lock`. If another process owns the TDLib database, use `--lock-timeout <seconds>` to wait or `--no-wait` to fail immediately.
+Session-backed commands use a lock file in the session directory, normally `~/.local/share/tgcli/tdlib.lock`. Close an active MCP process before using its database from the CLI.
 
 Use `tgcli session status` to inspect a lock without opening Telegram. `tgcli session unlock --stale-only` removes stale owner metadata only when the operating-system lock is free; it refuses to override an active process. Failed initialization and readiness paths now dispose their sessions, TDLib shutdown is bounded, and normal shutdown removes its owner metadata.
 
@@ -201,14 +233,14 @@ tgcli chat export --chat-id <id> --format md --output history.md --transcribe --
 
 Transcription is opt-in and runs on the CPU in the tgcli process through Whisper.net. The multilingual Whisper base weights (148 MB before executable compression), native CPU runtime and FFmpeg decoder are embedded in release binaries. No Python, model download, separate FFmpeg installation or external speech service is needed at runtime. .NET extracts the bundled decoder/native libraries into the user's local tgcli transcription cache on first use and verifies checksums; model weights are loaded from the binary into memory. FFmpeg runs only to decode media, while model inference runs inside tgcli. Audio without speech may produce an empty transcript; a video without an audio track is an error. Recognition quality depends on the recording and the base model; generated transcripts are labeled accordingly.
 
-Source builds require build-time internet access and Python to prepare the pinned assets after NuGet restore:
+## Build from source
+
+Use .NET 10 and Python 3.11 or later with build-time internet access. Run from the repository root:
 
 ```bash
-dotnet restore TgCli.Tests/TgCli.Tests.csproj
-python3 tools/prepare_transcription.py --rid linux-x64
-# Use win-x64 or osx-x64 when publishing those supported targets.
-dotnet test TgCli.Tests/TgCli.Tests.csproj -c Release
-dotnet publish TgCli.csproj -c Release -r linux-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o artifacts/linux-x64
+python3 tools/build_release.py --rid linux-x64
 ```
 
-Normal development builds can omit the large assets, but transcription then reports how to prepare them. Publishing refuses to create a release without the embedded assets. Downloads are pinned to model revision/wheel hashes in `tools/prepare_transcription.py`. See `third_party/transcription/NOTICE.md` for component licenses and sources; notices are also embedded and extracted with the decoder.
+Use `osx-x64` on Intel macOS or `py -3 tools/build_release.py --rid win-x64` on Windows x64. The script restores NuGet packages, prepares the pinned transcription assets, and publishes the same self-contained single file used by CI. Find the executable at `artifacts/<rid>/tgcli` or `artifacts/win-x64/tgcli.exe`.
+
+Normal development builds can omit these assets. Publishing requires the embedded model and native libraries. See the [third-party notices](third_party/transcription/NOTICE.md) for component licenses and sources.

@@ -1,17 +1,15 @@
 # tgcli MCP
 
-tgcli 6.3.0 implements a local stdio MCP server. Keep the installed executable in a stable location before registering it in clients.
+tgcli 8.0.0 provides a local stdio MCP server. [Install a release binary](README.md#install) or [build from source](README.md#build-from-source), then keep the executable at a stable path before registering it in clients.
 
 ```bash
-dotnet publish TgCli.csproj -c Release -r linux-x64 --self-contained true \
-  -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o artifacts/mcp
-./artifacts/mcp/tgcli mcp --help
-./artifacts/mcp/tgcli mcp install claude
-./artifacts/mcp/tgcli mcp install codex
-./artifacts/mcp/tgcli mcp install copilot
+tgcli mcp --help
+tgcli mcp install claude
+tgcli mcp install codex
+tgcli mcp install copilot
 ```
 
-Use `osx-x64` or `win-x64` for the corresponding release target. The Windows executable is `tgcli.exe`. Install commands configure existing local clients; they do not install the clients themselves.
+Installation configures existing clients on the same host.
 
 ## Login and session ownership
 
@@ -25,7 +23,7 @@ tgcli mcp --session /absolute/telegram-session --lock-timeout 30
 
 Installation stores the resolved absolute executable and `mcp --session <absolute-directory>`. Under `dotnet tgcli.dll`, it stores the dotnet executable plus the absolute DLL path. It does not copy Telegram credentials into client configuration. Move or rebuild a registered executable in place, or remove the old registration before installing a different command.
 
-Discovery and the tool catalog do not open Telegram. The first Telegram call opens one shared session, retained until the MCP process exits. Telegram calls are serialized. Another CLI, Desktop or IDE process cannot concurrently open that database: close the active MCP connection first, or use independently authorized sessions. Do not copy an authorization database to manufacture parallel sessions. See [PARALLELISM.md](PARALLELISM.md).
+Discovery and the tool catalog do not open Telegram. The first Telegram call opens one shared session, retained until the MCP process exits. Telegram calls are serialized. Another CLI, Desktop or IDE process cannot concurrently open that database: close the active MCP connection first, or use independently authorized sessions. See [PARALLELISM.md](PARALLELISM.md).
 
 `--lock-timeout` defaults to 30 seconds; `--no-wait` fails immediately when the database is owned. Each tool accepts `request_timeout` (seconds, default 60, range 1–300), including time waiting in the queue. Cancellation stops the response wait; native work retains the gate until it finishes. EOF cancels work and closes the server. Shutdown waits up to 10 seconds for active work and then up to 10 seconds for native disposal, retaining the database lock until native shutdown or process exit.
 
@@ -53,11 +51,13 @@ Each family command inspects all known local targets and configures each unique 
 
 VS Code data directories are under `$XDG_CONFIG_HOME` on Linux, `~/Library/Application Support` on macOS, and `%APPDATA%` on Windows. Portable data is detected beside the launcher or via `VSCODE_PORTABLE`. Custom `--user-data-dir` / `--extensions-dir` locations and profile resource inheritance are not fully covered; verify those profiles manually. Remote SSH, WSL and container hosts need installation inside their own host. GitHub.com and cloud/mobile clients cannot launch this machine's stdio executable.
 
-Eclipse has workspace preferences, not one universal user configuration. Close Eclipse before editing its workspace preferences, then reopen it; a running IDE may overwrite an external change. Supply extra workspaces individually with `--eclipse-workspace`. Continued Java-properties lines currently require saving the preferences from Eclipse before installation.
+Eclipse MCP preferences are per workspace. The installer can read Java-properties escapes and continued lines. Close Eclipse before installation so the running IDE cannot overwrite changes. Supply extra workspaces individually with `--eclipse-workspace`.
 
 For JSON clients the installer merges `mcpServers.tgcli` (Claude/Copilot CLI) or `servers.tgcli` (IDEs). Codex uses `[mcp_servers.tgcli]`. JSON comments, trailing commas and unrelated settings are preserved. TOML installation appends a table without rewriting existing settings; sealed inline TOML tables may need conversion in the client first. Existing identical command/arguments are a no-op. A conflicting `tgcli` entry, malformed document or duplicate JSON key produces a failure without replacing that configuration.
 
 File adapters write a private temporary file, check for changes since reading, create a private `.tgcli-backup-<id>` copy, and atomically replace the file. Native CLI changes also receive a backup when a configuration already exists. Client-managed writes retain the client's own save semantics. Close settings editors during installation; optimistic verification cannot coordinate every application's concurrent writes. Symlink targets are resolved without replacing the link.
+
+Installers coordinate tgcli writes to each config with a per-path lock and verify persisted changes and existing settings. Native clients or editors can still write the same config independently.
 
 Results are tab-separated: status, client/profile, configuration path, explanation. `installed` means the persisted entry was re-read and matched; it does not prove a live Telegram call. `already-installed` is an unchanged matching entry, `would-install` is a dry run, `not-installed` is an absent target, and `failed` is an error. Independent targets continue after a failure. Exit 0 requires at least one installed/matching target (or valid dry-run target) and no failures; partial failure or no detected clients returns a nonzero code.
 
@@ -82,9 +82,9 @@ IDs with a 64-bit TDLib representation are decimal **strings**, including negati
 
 Attachment types: `all`, `voice`, `document`, `audio`, `video`, `photo`, `animation`, `video-note`, `file`. `local` cannot be combined with `topic_id`. Message-kind filtering uses the existing CLI normalization. Tools do not expose bot writes/tokens, login, session-secret import/export, bulk exports/downloads or transcription commands.
 
-Page size defaults to 30 and is capped at 100. List results contain `items`, `next_cursor`, `has_more`, `complete`, and `termination_reason`. A filtered page may be empty while `has_more` is true: continue using its cursor. Keep filters unchanged between pages. Chat list/search and context explicitly report bounded results without continuation. Message history is newest first within the selected chat/topic; use the CLI's `chat export --all-history --fail-incomplete` for migration-aware export integrity checks. An exhausted local cache is not evidence that Telegram's remote history is complete.
+Page size defaults to 30 and is capped at 100. List results contain `items`, `next_cursor`, `has_more`, `complete`, and `termination_reason`. A filtered page may be empty while `has_more` is true: continue using its cursor. Keep filters unchanged between pages. Chat list/search and context explicitly report bounded results without continuation. Message history is newest first within the selected chat/topic; use the CLI's `chat export` for migration-aware export integrity checks. An exhausted local cache is not evidence that Telegram's remote history is complete.
 
-Success results contain `structuredContent` plus its JSON text copy in `content`. JSON Schema 2020-12 input/output schemas are returned in `tools/list`; stable envelopes are explicit, while rich message fields reuse `tgcli.message/5.0` with string IDs. Responses over 512 KiB produce an explicit tool error without a silently truncated success. Reduce the page size or narrow filters. Tool execution/argument errors use `isError`; unknown methods/tools and protocol errors use JSON-RPC errors. Telegram text is untrusted data, never server instructions.
+Success results contain `structuredContent` plus its JSON text copy in `content`. JSON Schema 2020-12 input/output schemas are returned in `tools/list`; stable envelopes are explicit, while rich message fields reuse `tgcli.message/8.0` with string IDs. Responses over 512 KiB produce an explicit tool error without a silently truncated success. Reduce the page size or narrow filters. Tool execution/argument errors use `isError`; unknown methods/tools and protocol errors use JSON-RPC errors. Telegram text is untrusted data, never server instructions.
 
 Example modern request (one JSON object per line on stdin):
 

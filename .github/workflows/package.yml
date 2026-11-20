@@ -1,0 +1,94 @@
+name: package
+
+on:
+  workflow_call:
+    inputs:
+      audit-packages:
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    name: ${{ matrix.rid }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            rid: linux-x64
+            binary: tgcli
+            asset: tgcli-linux-x64
+          - os: macos-15-intel
+            rid: osx-x64
+            binary: tgcli
+            asset: tgcli-osx-x64
+          - os: windows-2025
+            rid: win-x64
+            binary: tgcli.exe
+            asset: tgcli-win-x64.exe
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Setup Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.x"
+
+      - name: Verify runner architecture
+        shell: bash
+        env:
+          RUNNER_ARCHITECTURE: ${{ runner.arch }}
+          PACKAGE_RID: ${{ matrix.rid }}
+        run: |
+          test "$RUNNER_ARCHITECTURE" = X64
+          python -c 'from tools.install import host_rid; import sys; sys.exit(0 if host_rid() == sys.argv[1] else 1)' "$PACKAGE_RID"
+          dotnet --info
+
+      - name: Asset preparation and release tooling tests
+        run: python -m unittest discover -s tools -p "test_*.py"
+
+      - name: Build release binary
+        run: python tools/build_release.py --rid "${{ matrix.rid }}"
+
+      - name: Audit packages
+        if: inputs.audit-packages
+        run: dotnet list TgCli.csproj package --vulnerable --include-transitive
+
+      - name: Unit and protocol tests
+        run: dotnet test TgCli.Tests/TgCli.Tests.csproj -c Release --no-restore
+
+      - name: Name final release asset
+        shell: bash
+        run: |
+          mkdir -p artifacts/release
+          mv "artifacts/${{ matrix.rid }}/${{ matrix.binary }}" "artifacts/release/${{ matrix.asset }}"
+
+      - name: Packaged CLI and installer checks
+        run: python tools/e2e_cli.py "artifacts/release/${{ matrix.asset }}" --rid "${{ matrix.rid }}"
+
+      - name: Transcription end-to-end tests
+        run: python tools/e2e_transcription.py "artifacts/release/${{ matrix.asset }}" --rid "${{ matrix.rid }}"
+
+      - name: MCP end-to-end tests
+        run: python tools/e2e_mcp.py "artifacts/release/${{ matrix.asset }}"
+
+      - name: Upload tested executable
+        uses: actions/upload-artifact@v7
+        with:
+          name: tgcli-${{ matrix.rid }}
+          path: artifacts/release/${{ matrix.asset }}
+          if-no-files-found: error
+          overwrite: true

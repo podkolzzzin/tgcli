@@ -55,9 +55,10 @@ def protocol(executable, home, legacy=False, arguments=None):
         if not legacy:
             assert result["resultType"] == "complete"
             assert request("tools/list", {}, "2099-01-01")["error"]["code"] == -32022
-        # No API credentials are provided: readiness must fail as a tool result,
-        # without prompting for login or corrupting stdout.
-        assert request("tools/call", {"name": "diagnostics"})["result"]["isError"]
+        # Diagnostics reports an unhealthy session without prompting for login.
+        diagnostics = request("tools/call", {"name": "diagnostics"})["result"]
+        assert not diagnostics.get("isError", False), diagnostics
+        assert diagnostics["structuredContent"]["healthy"] is False, diagnostics
         assert len(request("tools/list", {})["result"]["tools"]) == 12
         process.stdin.close()
         assert process.wait(timeout=20) == 0
