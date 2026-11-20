@@ -260,7 +260,7 @@ public sealed class TelegramSessionLifetimeTests : IDisposable
     private sealed class SyntheticClient : ITelegramSessionNative
     {
         public event EventHandler<TdApi.Update>? UpdateReceived;
-        public TdClient? Client => null;
+        public TdApi.IClient? Client => null;
         public Func<Task> SetVerbosity { get; init; } = () => Task.CompletedTask;
         public Func<Task<TdApi.AuthorizationState>> GetAuthorization { get; set; } =
             () => Task.FromResult<TdApi.AuthorizationState>(new TdApi.AuthorizationState.AuthorizationStateReady());

@@ -19,7 +19,7 @@ internal interface IBotTransport : IAsyncDisposable
 internal sealed class TdBotTransport : IBotTransport
 {
     private readonly TelegramSession _session;
-    private TdClient Client => _session.Client;
+    private TdApi.IClient Client => _session.Client;
 
     private TdBotTransport(TelegramSession session)
     {

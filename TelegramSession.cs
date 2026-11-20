@@ -39,7 +39,7 @@ internal sealed class TelegramSession : IAsyncDisposable
         _native.UpdateReceived += OnUpdateReceived;
     }
 
-    public TdClient Client => _native.Client ?? throw new InvalidOperationException("No TDLib client is available.");
+    public TdApi.IClient Client => _native.Client ?? throw new InvalidOperationException("No TDLib client is available.");
     public string SessionDirectory => _config.RootDirectory;
     public string DatabaseDirectory => _config.DatabaseDirectory;
     public string FilesDirectory => _config.FilesDirectory;

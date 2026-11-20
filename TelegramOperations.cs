@@ -12,14 +12,21 @@ internal static class TelegramOperations
         ListChatsAsync(tg.Client, limit, cancellationToken, retainNativeOperation);
 
     internal static async Task<TdApi.Chats> ListChatsAsync(TdApi.IClient client, int limit,
-        CancellationToken cancellationToken, bool retainNativeOperation = true)
+        CancellationToken cancellationToken, bool retainNativeOperation = true) =>
+        (await ListChatDetailsAsync(client, limit, cancellationToken, retainNativeOperation)).Chats;
+
+    internal static Task<ChatListReadResult> ListChatDetailsAsync(TelegramSession tg, int limit,
+        CancellationToken cancellationToken = default, bool retainNativeOperation = true) =>
+        ListChatDetailsAsync(tg.Client, limit, cancellationToken, retainNativeOperation);
+
+    private static async Task<ChatListReadResult> ListChatDetailsAsync(TdApi.IClient client, int limit,
+        CancellationToken cancellationToken, bool retainNativeOperation)
     {
         ReadBounds.ValidatePage(0, 0, limit, 1);
-        cancellationToken.ThrowIfCancellationRequested();
         var main = new TdApi.ChatList.ChatListMain();
         var loadedCount = 0;
         var previousCount = -1;
-        while (true)
+        for (var page = 1; ; page++)
         {
             cancellationToken.ThrowIfCancellationRequested();
             var exhausted = false;
@@ -32,11 +39,13 @@ internal static class TelegramOperations
                 exhausted = true;
             }
 
+            cancellationToken.ThrowIfCancellationRequested();
             var result = await AwaitReadAsync(client.GetChatsAsync(main, limit), cancellationToken, retainNativeOperation);
             loadedCount = result.ChatIds?.Length ?? 0;
-            if (loadedCount >= limit || exhausted) return result;
-            if (loadedCount <= previousCount)
-                throw new InvalidOperationException("The main chat list did not advance after loading.");
+            // A full slice cannot distinguish exactly this many chats from a longer loaded list.
+            if (loadedCount >= limit) return new(result, false, "bounded_no_continuation", page, true);
+            if (exhausted) return new(result, true, "chat_list_exhausted", page, false);
+            if (loadedCount <= previousCount) return new(result, false, "chat_list_not_advanced", page, false);
             previousCount = loadedCount;
         }
     }
@@ -318,6 +327,9 @@ internal static class TelegramOperations
         }
     }
 }
+
+internal sealed record ChatListReadResult(TdApi.Chats Chats, bool Complete, string TerminationReason,
+    int PagesFetched, bool LimitSatisfied);
 
 internal sealed record MessageSearchResult(List<TdApi.Message> Messages, long? NextMessageId,
     bool Complete, string TerminationReason, int PagesFetched, bool LimitSatisfied);

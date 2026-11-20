@@ -1305,7 +1305,7 @@ public sealed class ChatCommands
     internal static IEnumerable<TdApi.Message> FilterMessages(IEnumerable<TdApi.Message> messages, bool serviceOnly, string? kind) =>
         messages.Where(MessagePredicate(serviceOnly, kind));
 
-    private static Func<TdApi.Message, bool> MessagePredicate(bool serviceOnly, string? kind)
+    internal static Func<TdApi.Message, bool> MessagePredicate(bool serviceOnly, string? kind)
     {
         var requestedKind = string.IsNullOrWhiteSpace(kind) ? null : NormalizeKind(kind);
         return message =>
@@ -1387,7 +1387,7 @@ public sealed class ChatCommands
         or TdApi.MessageContent.MessageWebAppDataReceived
         or TdApi.MessageContent.MessageWebAppDataSent;
 
-    private static string NormalizeKind(string value)
+    internal static string NormalizeKind(string value)
     {
         return value.Trim().Replace("_", "-").ToLowerInvariant() switch
         {

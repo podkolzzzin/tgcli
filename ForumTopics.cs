@@ -288,16 +288,16 @@ public sealed class ForumCommands
 
     internal static async Task<ForumTopicsResult> FetchTopicsAsync(
         long chatId, string query, int limit, bool all, int maxPages,
-        Func<TdApi.GetForumTopics, Task<TdApi.ForumTopics>> fetch, CancellationToken cancellationToken)
+        Func<TdApi.GetForumTopics, Task<TdApi.ForumTopics>> fetch, CancellationToken cancellationToken,
+        (int Date, long Message, int Topic) startOffset = default)
     {
         ReadBounds.ValidatePage(0, 0, limit, maxPages);
         var topics = new List<TdApi.ForumTopic>();
         var seenTopics = new HashSet<int>();
-        (int Date, long Message, int Topic) offset = default;
+        var offset = startOffset;
         var seenOffsets = new HashSet<(int Date, long Message, int Topic)> { offset };
-        var budget = all ? maxPages : 1;
 
-        for (var page = 1; page <= budget; page++)
+        for (var page = 1; page <= maxPages; page++)
         {
             cancellationToken.ThrowIfCancellationRequested();
             var response = await fetch(new TdApi.GetForumTopics
@@ -307,18 +307,21 @@ public sealed class ForumCommands
                 OffsetDate = offset.Date,
                 OffsetMessageId = offset.Message,
                 OffsetForumTopicId = offset.Topic,
-                Limit = limit
+                Limit = all ? limit : limit - topics.Count
             });
             cancellationToken.ThrowIfCancellationRequested();
             topics.AddRange((response.Topics ?? []).Where(topic => topic.Info is not null && seenTopics.Add(topic.Info.ForumTopicId)));
+            var limitSatisfied = topics.Count >= limit;
             offset = (response.NextOffsetDate, response.NextOffsetMessageId, response.NextOffsetForumTopicId);
             if (offset == default)
-                return new(topics, null, true, "topics_exhausted", page);
+                return new(topics, null, true, "topics_exhausted", page, limitSatisfied);
             if (!seenOffsets.Add(offset))
-                return new(topics, null, false, "cursor_not_advanced", page);
+                return new(topics, null, false, "cursor_not_advanced", page, limitSatisfied);
+            if (!all && limitSatisfied)
+                return new(topics, offset, false, "page_limit", page, true);
         }
 
-        return new(topics, offset, false, all ? "max_pages_reached" : "page_limit", budget);
+        return new(topics, offset, false, "max_pages_reached", maxPages, topics.Count >= limit);
     }
 
     private static string Clean(string? value)
@@ -329,4 +332,4 @@ public sealed class ForumCommands
 
 
 internal sealed record ForumTopicsResult(List<TdApi.ForumTopic> Topics,
-    (int Date, long Message, int Topic)? Next, bool Complete, string TerminationReason, int PagesFetched);
+    (int Date, long Message, int Topic)? Next, bool Complete, string TerminationReason, int PagesFetched, bool LimitSatisfied);

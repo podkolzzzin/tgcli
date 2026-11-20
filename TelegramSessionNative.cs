@@ -4,7 +4,7 @@ namespace TgCli;
 
 internal interface ITelegramSessionNative : IDisposable
 {
-    TdClient? Client { get; }
+    TdApi.IClient? Client { get; }
     event EventHandler<TdApi.Update>? UpdateReceived;
     Task SetLogVerbosityAsync();
     Task<TdApi.AuthorizationState> GetAuthorizationStateAsync();
@@ -13,9 +13,11 @@ internal interface ITelegramSessionNative : IDisposable
 
 internal sealed class TelegramSessionNative : ITelegramSessionNative
 {
-    private TelegramSessionNative(TdClient client) => Client = client;
+    private readonly TdClient _client;
 
-    public TdClient Client { get; }
+    private TelegramSessionNative(TdClient client) => _client = client;
+
+    public TdApi.IClient Client => _client;
 
     public event EventHandler<TdApi.Update>? UpdateReceived
     {
@@ -32,5 +34,5 @@ internal sealed class TelegramSessionNative : ITelegramSessionNative
     public Task SetLogVerbosityAsync() => Client.SetLogVerbosityLevelAsync(0);
     public Task<TdApi.AuthorizationState> GetAuthorizationStateAsync() => Client.GetAuthorizationStateAsync();
     public Task SetParametersAsync(TdApi.SetTdlibParameters parameters) => Client.ExecuteAsync(parameters);
-    public void Dispose() => Client.Dispose();
+    public void Dispose() => _client.Dispose();
 }
