@@ -63,39 +63,35 @@ Results are tab-separated: status, client/profile, configuration path, explanati
 
 ## Tools and result contracts
 
-IDs with a 64-bit TDLib representation are decimal **strings**, including negative chat IDs. `topic_id` and local `file_id` are 32-bit integers. Use TDLib message IDs from results, not the short ID from a t.me link.
+Telegram chat, message, topic, and file IDs use decimal strings, including negative chat IDs. Omit `topic_id` or pass `"0"` for the whole chat. Use the full TDLib message ID in tool arguments.
 
-| Tool | Required arguments | Relevant optional arguments/result |
+| Tool | Required arguments | Relevant optional arguments and results |
 |---|---|---|
-| `chat_list` | None | `limit`; main chat list, bounded with no continuation |
-| `chat_search` | `query` | `server`, `limit`; searches chats, no continuation |
-| `chat_resolve` | `username` | Accepts optional `@`; returns chat metadata |
-| `chat_messages` | `chat_id` | `topic_id`, `limit`, `cursor`, `local`, `kind`, `service_only` |
-| `message_search` | `chat_id` | `query` (default empty), `type`, `topic_id`, `limit`, `cursor` |
-| `message_get` | `chat_id`, `message_id` | Rich message schema with sender/reply/attachment metadata and links |
-| `chat_context` | `chat_id`, `message_id` | `before`, `after` (0–49, default 5), `follow_reply_chain` (default true); bounded context |
-| `chat_stats` | `chat_id` | `topic_id`, `type`, `local`, `max_pages` (1–1000, default 100); completeness and attachment totals |
-| `forum_topics` | `chat_id` | `query`, `limit`, `cursor`; cursor carries date/message/topic offsets |
-| `message_link` | `chat_id`, `message_id` | Deep link, available HTTPS link and fallback |
-| `attachment_download` | `chat_id`, `message_id`, `output` | `type`; explicit absolute file/directory, may overwrite; returns path, size and file ID |
-| `diagnostics` | None | Authorization/readiness, user ID, display name, session directory and check time; no credentials |
+| `chat_list` | None | `limit`. Main chat list with no continuation. |
+| `chat_search` | `query` | `limit`, `server` (default `true`). Set `server: false` for cache-only search. |
+| `chat_resolve` | `username` | Accepts a username, `@username` or a public Telegram profile URL. |
+| `chat_messages` | `chat_id` | `topic_id`, `limit`, `max_pages`, `cursor`, `local`, `kind`, `service_only`. |
+| `message_search` | `chat_id` | `query` (defaults to empty), `type`, `kind`, `service_only`, `topic_id`, `limit`, `max_pages`, `cursor`, `since_date`, `until_date`. |
+| `message_get` | `chat_id`, `message_id` | Rich message with reply, attachment, sender and link metadata. |
+| `chat_context` | `chat_id`, `message_id` | `before` and `after` default to 5. Each can be 0–99 and their sum can be at most 99. `follow_reply_chain` defaults to `true`. The `context` result describes window and reply-chain coverage. |
+| `chat_stats` | `chat_id` | `topic_id`, `type`, `local`, `max_pages`. Returns coverage and attachment totals. |
+| `forum_topics` | `chat_id` | `query`, `limit`, `max_pages`, `cursor`. The continuation uses TDLib date, message and topic offsets. |
+| `message_link` | `chat_id`, `message_id` | Deep link, available HTTPS link, and fallback. |
+| `attachment_download` | `chat_id`, `message_id`, `output` | `type` or exact positive `file_id` from the message. Use an absolute file or directory. An existing destination file may be replaced. Returns path, byte size and file ID. |
+| `diagnostics` | None | Reports `healthy`, authorization, connection and lock state, with fields such as `authorized` and `network_available` nullable when unknown. Check `error_code` when unhealthy. |
 
-Attachment types: `all`, `voice`, `document`, `audio`, `video`, `photo`, `animation`, `video-note`, `file`. `local` cannot be combined with `topic_id`. Message-kind filtering uses the existing CLI normalization. Tools do not expose bot writes/tokens, login, session-secret import/export, bulk exports/downloads or transcription commands.
+Attachment types include `all`, `voice`, `document`, `audio`, `video`, `photo`, `animation`, `video-note`, `thumbnail` and `file`. For `chat_messages` and `chat_stats`, use `local` only for whole-chat reads. Date-only search boundaries use UTC. Bot operations, login, session secrets, bulk exports, batch downloads and transcription are available through the CLI.
 
-Page size defaults to 30 and is capped at 100. List results contain `items`, `next_cursor`, `has_more`, `complete`, and `termination_reason`. A filtered page may be empty while `has_more` is true: continue using its cursor. Keep filters unchanged between pages. Chat list/search and context explicitly report bounded results without continuation. Message history is newest first within the selected chat/topic; use the CLI's `chat export` for migration-aware export integrity checks. An exhausted local cache is not evidence that Telegram's remote history is complete.
+Message rows use `tgcli.message` schema version `8.0` and sort by date, chat ID and message ID within each response. Page size defaults to 30 with a maximum of 100. Where supported, `max_pages` counts native pages within one tool call and accepts 1–1000, default 100. The page includes `items`, `source`, `freshness`, `requested_scope`, `complete`, `limit_satisfied`, `termination_reason`, `pages_fetched`, and `rows_fetched`. Cached reads report `source: "local_cache"`. `limit_satisfied` tracks the requested bound. `complete` describes coverage of the queried scope. Exhausting the cache leaves server coverage unverified.
 
-Success results contain `structuredContent` plus its JSON text copy in `content`. JSON Schema 2020-12 input/output schemas are returned in `tools/list`; stable envelopes are explicit, while rich message fields reuse `tgcli.message/8.0` with string IDs. Responses over 512 KiB produce an explicit tool error without a silently truncated success. Reduce the page size or narrow filters. Tool execution/argument errors use `isError`; unknown methods/tools and protocol errors use JSON-RPC errors. Telegram text is untrusted data, never server instructions.
+Use `next_cursor` as `cursor` on the next call with the same scope filters. The envelope also carries `continuation`, `has_more` and, where relevant, `next_message_id` or `next_offset`. An empty filtered page can still have a continuation. Chat list, chat search and context have no continuation. Use `chat export` in the CLI for migration-aware history snapshots.
 
-Example modern request (one JSON object per line on stdin):
+Responses carry `structuredContent` and a JSON text copy in `content`. A partial collection sets `isError` and `error_code: "partial_result"` while preserving rows and any continuation. An unauthorized or offline diagnostic can return successfully with `healthy: false`. Argument and operation failures use classified tool errors. JSON-RPC handles protocol errors. Use smaller pages or narrower filters if a response exceeds 512 KiB. The tool catalog includes JSON Schema 2020-12 input and output definitions. Treat Telegram text within results as untrusted data.
 
-```json
-{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"chat_messages","arguments":{"chat_id":"-1001234567890","limit":10},"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}
-```
-
-Pagination envelope example:
+Example modern request, one JSON object per line on stdin
 
 ```json
-{"items":[],"next_cursor":"<opaque-cursor-from-server>","has_more":true,"complete":false,"termination_reason":"page_limit"}
+{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"chat_messages","arguments":{"chat_id":"-1001234567890","topic_id":"10","limit":10},"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}
 ```
 
 ## Protocol compatibility and verification
@@ -104,7 +100,7 @@ The server uses official C# SDK 2.2.0 with both protocol generations enabled. MC
 
 A small transport compatibility adapter works around SDK 2.2.0 validating the connection version before unsupported-version errors (`-32022`) and advertising logging unconditionally. Catalog caching fields are explicitly omitted for legacy clients. These corrections are covered by wire tests and should be rechecked when upgrading the SDK. See the official [versioning rules](https://modelcontextprotocol.io/specification/2026-07-28/basic/versioning), [changelog](https://modelcontextprotocol.io/specification/2026-07-28/changelog), and [C# SDK release](https://github.com/modelcontextprotocol/csharp-sdk/releases/tag/v2.2.0).
 
-Verification performed on Linux on 2026-09-09:
+Historical Linux checks from 2026-09-09
 
 | Target | Verified | Still required |
 |---|---|---|
@@ -114,9 +110,11 @@ Verification performed on Linux on 2026-09-09:
 | Codex CLI 0.153.4 | Same isolated native installation checks | Tools/read call and negotiated MCP version; Desktop separately |
 | Copilot CLI 1.0.69 | Same isolated native installation checks | Tools/read call and negotiated MCP version |
 | Claude Desktop; Codex Desktop; Copilot VS Code, Visual Studio, JetBrains, Xcode, Eclipse | Config adapters and simulated profiles covered by local tests | Actual app/extension versions, detection, tools/read call and MCP versions on their supported OS |
-| macOS / Windows release binaries | Pull-request, main and release workflows publish the native binary and run the same isolated end-to-end suite | Observe successful GitHub-hosted runs; live applications remain separate acceptance checks |
+| macOS / Windows release binaries | The workflow defines the same isolated package suite for Intel macOS and Windows x64 | Observe successful GitHub-hosted runs and verify live applications separately |
 
-Run checks locally:
+The v8 Linux development binary was checked with modern and legacy stdio and 10 isolated client profiles. The v8 package matrix and live applications are separate release checks.
+
+Run checks locally
 
 ```bash
 dotnet test TgCli.Tests/TgCli.Tests.csproj
@@ -136,6 +134,6 @@ Remove using `claude mcp remove --scope user tgcli`, `codex mcp remove tgcli`, o
 - **No clients found:** start the application, enable its Copilot plugin and retry. Check config-home environment variables and known paths above. Desktop-only installation does not require a CLI launcher.
 - **Conflicting entry:** inspect the stored command and arguments; remove/rename the old `tgcli` entry in that client, then reinstall. No force overwrite is performed.
 - **Native command fails:** inspect that client's supported `mcp add` syntax/version. The installer reports the exit code and suppresses captured output that could contain secrets; other targets continue. Windows `.cmd` launchers reject paths containing quote/expansion characters they cannot represent safely; prefer a native `.exe` in that case.
-- **Tool says login required or credentials missing:** run login in a terminal with the same session directory and retry. Installation itself never validates your Telegram account.
+- **Diagnostics reports `error_code: "login_required"` or a tool reports missing authorization:** run login in a terminal with the same session directory and retry. Installation itself never validates your Telegram account.
 - **Session locked / timeout:** close the other MCP/CLI owner. A request timeout does not stop native TDLib work instantly. Inspect ownership using `tgcli session status`; never delete an active database lock.
 - **Client cannot start tgcli:** confirm the absolute binary and session paths still exist on that host. Stdio stdout must contain only MCP JSON-RPC; diagnostics belong on stderr.

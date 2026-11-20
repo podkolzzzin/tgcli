@@ -4,8 +4,9 @@
 
 - Synchronize online reads within the operation deadline. Explicit cache-only reads report the cache as their source.
 - Use one versioned rich message schema for CLI and MCP JSON. Machine-readable IDs are decimal strings. Collection output reports acquisition scope and completeness.
-- Export complete history by default, validate snapshot scope, and reconcile edits and deletions only from authoritative refreshes.
+- Export complete history by default and validate the account, schema and scope before updating a snapshot. Reconcile edits and verified deletions with `--incremental`.
 - Classify invalid arguments, partial results, missing authorization, timeouts, and interrupted operations with distinct exit codes.
+- Reuse verified batch downloads, preserving a receipt for every input row. Keep offline transcription bundled and supervise optional external transcribers on Linux.
 - Verify checksums and startup before replacing an installed executable. Run the same packaged CLI, installer, MCP, and transcription checks for pull requests and releases.
 
 Review the [v8 migration guide](https://github.com/podkolzzzin/tgcli/blob/v8.0.0/docs/v8-migration.md) before updating automation or refreshing older exports.

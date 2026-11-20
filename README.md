@@ -20,7 +20,7 @@ MCP `2026-07-28` uses per-request metadata without a handshake; older clients ca
 
 See [MCP.md](MCP.md) for the client/OS matrix, detection rules, tools, configuration, verification, removal, and known limitations. The [implementation plan](MCP_PLAN.md) retains the outstanding acceptance checks; Desktop/IDE interoperability is not yet fully verified.
 
-Pull requests, main-branch changes, and releases run the same packaged CLI, installer, local transcription, and MCP checks on Linux x64, macOS Intel, and Windows x64. MCP checks use isolated profiles and simulated client launchers.
+The shared CI workflow defines packaged CLI, installer, local transcription, and MCP checks on Linux x64, Intel macOS, and Windows x64 for pull requests, main, and releases. MCP checks use isolated profiles and simulated client launchers.
 
 ## Install
 
@@ -126,17 +126,17 @@ tgcli chat search --chat-id 123456789 --query "" --type video --all --format jso
 tgcli download-batch --input videos.jsonl --type video --output ./videos --parallel 4
 ```
 
-Use `--input -` to read JSONL from stdin. Output filenames include the chat and message ids to avoid collisions. JSONL results preserve input order and report per-file failures; the command exits nonzero if any download failed.
+Use `--input -` to read JSONL from stdin. An input row can select an exact file with `attachment_id` or `file_id`. Output filenames distinguish attachments within a message. Multiple rows selecting the same attachment share a download and each receives a receipt in input order. Reusing the output directory lets a rerun skip files with verified attachment identity, length and SHA-256. A failed item produces an error receipt and exit code `3`.
 
 ## Export schema and completeness
 
 Message records in JSON and JSONL have `schema` set to `tgcli.message` and `schema_version` set to `8.0`. They include source chat and message IDs, links, sender identity, reply and forwarding context, edits, metrics, polls, service events, and attachment metadata. JSON command output is one document. JSONL output contains one data record per line. Message lists sort chronologically by date, chat ID, and message ID.
 
-`chat export` defaults to complete current history, including migrated history when present. Use `--limit N` to request a bounded export. Check the exit code and the sibling `<output>.manifest.json` for the acquisition scope, coverage and termination reason. A complete refresh validates the scope and reconciles message edits and deletions. For an older export schema, create a fresh v8 snapshot before refreshing. See the [migration guide](docs/v8-migration.md) for refresh and resume examples.
+`chat export` defaults to complete current history, including migrated history when present. Use `--limit N` with 1–100 for a bounded export. Check the exit code and the sibling `<output>.manifest.json` for the acquisition scope, coverage and termination reason. Use `--incremental` on a matching JSONL snapshot to reconcile edits and verified deletions from a complete refresh. For an older export schema, create a fresh v8 snapshot before refreshing. See the [migration guide](docs/v8-migration.md) for refresh and resume examples.
 
-Use `--transcribe` to generate transcripts for voice notes, video notes, audio and video. Set `--transcribe-language uk` to select Ukrainian. Transcripts include the model, detected language and timestamped segments in `attachments[].generated_text`. Markdown, plain and TSV exports include a generated-transcription block. The `--transcribe-command <executable>` option uses an external command for the same media kinds. Use either transcription option per invocation.
+Use `--transcribe` to generate transcripts for voice notes, video notes, audio and video. Set `--transcribe-language uk` to select Ukrainian. Transcripts include the model, detected language and timestamped segments in `attachments[].generated_text`. Markdown, plain and TSV exports include a generated-transcription block. For an external engine, use `--transcribe-command <executable>` and optional `--transcribe-command-args` with a JSON array. tgcli passes those arguments followed by the absolute media path and reads the transcript from stdout. Choose either the external engine or `--transcribe`. See [offline media transcription](#offline-media-transcription) for the executable requirements.
 
-`channel metrics` emits one row per post with views, forwards, replies, reactions, paid reactions, link domains, and engagement rate. `channel comments` resolves Telegram discussion threads and includes `channel_post_id`, `discussion_chat_id`, and `discussion_message_id` for each exported row.
+`channel metrics` emits one row per post with views, forwards, replies, reactions, paid reactions, link domains, and engagement rate. `channel comments` resolves Telegram discussion threads. Comment rows include `channel_post_id`, `discussion_chat_id`, and `discussion_message_id`. JSONL keeps discussion coverage on stderr. JSON includes comments in `items` and coverage in `threads` and `post_scan`.
 
 ## Forum topics and attachment sizes
 
@@ -192,7 +192,7 @@ The secret contains only `config.json` and TDLib's `tdlib-db/td.binlog` authoriz
 
 ## Read scope and exit codes
 
-Discovery and reads sync with Telegram by default. Commands that accept `--local` use the cache throughout and report `source=local_cache`. Inspect acquisition metadata for source exhaustion and continuation. For JSON collections the metadata is in the document. For scoped streamed output such as JSONL or TSV, read the result summary on stderr. File exports put acquisition metadata in their manifest.
+Discovery and reads sync with Telegram by default. Commands that accept `--local` read the cache, and collection coverage reports `source: "local_cache"`. Collection JSON includes rows in `items` alongside fields such as `complete`, `termination_reason` and any continuation. `chat search` groups results and coverage by query in `queries`. With JSONL or TSV, read acquisition coverage on stderr and check the exit code. For file exports, read the sibling manifest.
 
 | Exit code | Meaning |
 |---|---|
@@ -204,7 +204,7 @@ Discovery and reads sync with Telegram by default. Commands that accept `--local
 | 5 | Request deadline exceeded |
 | 130 | Cancelled |
 
-Most Telegram operations accept `--request-timeout` in seconds. The default is 60 seconds, covering lock acquisition, readiness, and the operation itself. `--lock-timeout` can reduce the time spent waiting for the session lock. `--no-wait` tries to acquire the lock immediately.
+`--request-timeout` accepts 1–3600 seconds and defaults to 60. It includes lock acquisition, readiness, and the operation itself. Where offered, `--lock-timeout` can shorten the lock wait and `--no-wait` tries to acquire the lock immediately. MCP tool calls have a separate deadline.
 
 ## Session storage
 
@@ -231,7 +231,9 @@ tgcli chat export --chat-id <id> --format jsonl --output history.jsonl --transcr
 tgcli chat export --chat-id <id> --format md --output history.md --transcribe --transcribe-language uk
 ```
 
-Transcription is opt-in and runs on the CPU in the tgcli process through Whisper.net. The multilingual Whisper base weights (148 MB before executable compression), native CPU runtime and FFmpeg decoder are embedded in release binaries. No Python, model download, separate FFmpeg installation or external speech service is needed at runtime. .NET extracts the bundled decoder/native libraries into the user's local tgcli transcription cache on first use and verifies checksums; model weights are loaded from the binary into memory. FFmpeg runs only to decode media, while model inference runs inside tgcli. Audio without speech may produce an empty transcript; a video without an audio track is an error. Recognition quality depends on the recording and the base model; generated transcripts are labeled accordingly.
+Transcription is opt-in and runs on the CPU in the tgcli process through Whisper.net. The release bundles the multilingual Whisper base weights (148 MB), native CPU runtime and FFmpeg decoder. The embedded engine runs with the bundled assets, including on a machine with no separate decoder, `setsid` utility or speech service. .NET extracts the bundled decoder/native libraries into the user's local tgcli transcription cache on first use and verifies checksums; model weights are loaded from the binary into memory. FFmpeg runs only to decode media, while model inference runs inside tgcli. Audio without speech may produce an empty transcript; a video without an audio track is an error. Recognition quality depends on the recording and the base model; generated transcripts are labeled accordingly.
+
+On Linux, tgcli supervises an optional external transcriber in a process group so cancellation reaches children that stay in the group even after the launcher exits. On macOS and Windows, the executable must wait for its children before exiting. If an exited launcher leaves its output pipes open, tgcli reports an error. A detached child can outlive the command.
 
 ## Build from source
 
