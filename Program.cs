@@ -9,6 +9,9 @@ internal static class Program
 {
     public static async Task<int> Main(string[] args)
     {
+        if (MediaProcess.TryRunChild(args))
+            return Environment.ExitCode;
+
         var app = ConsoleApp.Create();
         ConsoleApp.LogError = static message => Console.Error.WriteLine(CliFailure.BoundedMessage(message));
         app.UseFilter<CliErrorFilter>();

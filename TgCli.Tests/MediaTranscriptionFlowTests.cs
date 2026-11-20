@@ -34,12 +34,41 @@ public sealed class MediaTranscriptionFlowTests
         try
         {
             await using var transcription = new MediaTranscription(new("en", "/bin/echo extra"), () => throw new Exception("engine started"));
-            await Assert.ThrowsAsync<System.ComponentModel.Win32Exception>(() =>
+            var error = await Record.ExceptionAsync(() =>
                 transcription.TranscribeFileAsync(input, TestContext.Current.CancellationToken));
+            Assert.True(error is System.ComponentModel.Win32Exception or InvalidOperationException, error?.Message);
         }
         finally
         {
             File.Delete(input);
+        }
+    }
+
+    [Fact]
+    public async Task ExternalExecutableWithoutShebangDoesNotRunThroughAShell()
+    {
+        if (!OperatingSystem.IsLinux())
+            Assert.Skip("Exercises Linux executable format handling.");
+
+        var directory = Directory.CreateTempSubdirectory("tgcli-media-noshell-");
+        try
+        {
+            var executable = Path.Combine(directory.FullName, "plain-executable");
+            var input = Path.Combine(directory.FullName, "fixture.wav");
+            File.WriteAllText(input, "fixture");
+            File.WriteAllText(executable, "printf owned > \"$1.marker\"");
+            if (OperatingSystem.IsLinux())
+                File.SetUnixFileMode(executable, UnixFileMode.UserRead | UnixFileMode.UserExecute);
+            await using var transcription = TranscriptionCommands.Create(false, "en", executable)!;
+            var error = await Record.ExceptionAsync(() =>
+                transcription.TranscribeFileAsync(input, TestContext.Current.CancellationToken));
+
+            Assert.False(File.Exists(input + ".marker"), "An implicit shell ran a file with no executable format.");
+            Assert.NotNull(error);
+        }
+        finally
+        {
+            directory.Delete(true);
         }
     }
 
@@ -69,6 +98,95 @@ public sealed class MediaTranscriptionFlowTests
         info.ArgumentList.Add("-c");
         info.ArgumentList.Add("head -c 2000000 /dev/zero");
         await Assert.ThrowsAsync<InvalidOperationException>(() => MediaProcess.RunAsync(info, TestContext.Current.CancellationToken));
+    }
+
+    [Theory]
+    [InlineData(true, true)]
+    [InlineData(true, false)]
+    [InlineData(false, false)]
+    public async Task LauncherExitWithInheritedPipesHasBoundedOutcome(bool supervised, bool cancel)
+    {
+        if (!OperatingSystem.IsLinux())
+            Assert.Skip("Requires Linux process groups and /proc.");
+
+        var directory = Directory.CreateTempSubdirectory("tgcli-media-process-");
+        var pidFile = Path.Combine(directory.FullName, "child.pid");
+        var info = new ProcessStartInfo("/bin/sh") { RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false };
+        foreach (var argument in new[] { "-c", "sleep 30 & echo \"$$ $!\" > \"$1\"; exit 0", "fixture", pidFile })
+            info.ArgumentList.Add(argument);
+        var testToken = TestContext.Current.CancellationToken;
+        using var cancellation = CancellationTokenSource.CreateLinkedTokenSource(testToken);
+        var operation = MediaProcess.RunAsync(info, cancellation.Token, superviseExternal: supervised);
+        int childPid = 0;
+        try
+        {
+            using var readiness = CancellationTokenSource.CreateLinkedTokenSource(testToken);
+            readiness.CancelAfter(TimeSpan.FromSeconds(5));
+            string[] ids = [];
+            while (!File.Exists(pidFile) || (ids = (await File.ReadAllTextAsync(pidFile, readiness.Token))
+                .Trim().Split(' ')).Length != 2)
+            {
+                await Task.Delay(20, readiness.Token);
+            }
+
+            childPid = int.Parse(ids[1]);
+            while (GetStatus(childPid, "PPid:") == ids[0])
+                await Task.Delay(20, readiness.Token);
+            if (supervised)
+            {
+                var stat = File.ReadAllText($"/proc/{childPid}/stat");
+                var fields = stat[(stat.LastIndexOf(')') + 2)..].Split(' ');
+                var groupId = int.Parse(fields[2]);
+                Assert.NotEqual(Environment.ProcessId, groupId);
+                while (IsRunning(groupId))
+                    await Task.Delay(20, readiness.Token);
+            }
+
+            Assert.True(IsRunning(childPid));
+            if (cancel)
+            {
+                cancellation.Cancel();
+                await Assert.ThrowsAnyAsync<OperationCanceledException>(() => operation.WaitAsync(TimeSpan.FromSeconds(5), testToken));
+            }
+            else
+            {
+                var error = await Assert.ThrowsAsync<InvalidOperationException>(() => operation.WaitAsync(TimeSpan.FromSeconds(5), testToken));
+                Assert.Contains(supervised ? "descendant held its output pipes open" : "Descendant cleanup could not be verified", error.Message);
+            }
+            if (!supervised)
+                return;
+
+            var stopped = Stopwatch.StartNew();
+            while (IsRunning(childPid) && stopped.Elapsed < TimeSpan.FromSeconds(1))
+                await Task.Delay(20, testToken);
+            Assert.False(IsRunning(childPid), "The inherited-pipe child kept running after cancellation.");
+        }
+        finally
+        {
+            cancellation.Cancel();
+            if (childPid > 0 && IsRunning(childPid))
+            {
+                using var child = Process.GetProcessById(childPid);
+                child.Kill();
+            }
+            directory.Delete(true);
+        }
+    }
+
+    private static bool IsRunning(int processId) =>
+        GetStatus(processId, "State:") is { } state && !state.StartsWith("Z", StringComparison.Ordinal);
+
+    private static string? GetStatus(int processId, string field)
+    {
+        try
+        {
+            return File.ReadLines($"/proc/{processId}/status")
+                .FirstOrDefault(line => line.StartsWith(field, StringComparison.Ordinal))?[field.Length..].Trim();
+        }
+        catch (IOException)
+        {
+            return null;
+        }
     }
 
     [Fact]
