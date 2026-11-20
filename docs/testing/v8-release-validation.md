@@ -1,6 +1,6 @@
 # tgcli 8 release validation
 
-This record tracks the source, candidate, and release gates. See the [remediation matrix](v8-remediation-coverage.md) for named audit and historical-flow checks and the [migration guide](../v8-migration.md) for script changes.
+Release 8.0.0 is published and installed locally. This record separates final release verification from earlier candidate and controlled live evidence. See the [remediation matrix](v8-remediation-coverage.md) for named audit and historical-flow checks and the [migration guide](../v8-migration.md) for script changes.
 
 ## Integrated source and local execution
 
@@ -36,16 +36,38 @@ The second preliminary dispatch used `cd1d2f7`. Each job passed architecture che
 | Intel macOS x64 | .NET reported 456 passed and 11 skipped. All five packaged CLI and verified installer cases, embedded transcription, modern and legacy MCP, and 11 isolated client profiles passed. |
 | Windows x64 | .NET reported 452 passed and 15 skipped, including a pass for the extraction regression. The installer fixture verified the candidate bytes and removal of staging files. The packaged CLI gate then stopped at the test's PowerShell ACL query. The packaged transcription, MCP and upload steps did not run. |
 
-The Windows ACL diagnostic reproduced the PowerShell 5 security module's autoload failure on the original untouched sentinel and a synthetic replacement. `icacls` confirmed inheritance of the Authenticated Users read/execute entry on the synthetic replacement. The package test correction uses the native `icacls /save` check for an inherited allow entry by SID. The corrected query passed a hosted Windows probe. The complete matrix still needs to rerun. [PowerShell diagnostic](https://github.com/podkolzzzin/tgcli/actions/runs/44814293657), [native ACL query probe](https://github.com/podkolzzzin/tgcli/actions/runs/44814626274)
+The Windows ACL diagnostic reproduced the PowerShell 5 security module's autoload failure on the original untouched sentinel and a synthetic replacement. `icacls` confirmed inheritance of the Authenticated Users read/execute entry on the synthetic replacement. The package test correction uses the native `icacls /save` check for an inherited allow entry by SID. The corrected query passed a hosted Windows probe. The probe did not replace the complete package matrix. [PowerShell diagnostic](https://github.com/podkolzzzin/tgcli/actions/runs/44814293657), [native ACL query probe](https://github.com/podkolzzzin/tgcli/actions/runs/44814626274)
 
-The third dispatch passed every packaged gate on Linux and Windows, including the Windows inherited ACL check. Intel macOS exposed a diagnostic publication race: exit 5 could arrive without its JSON record when both the inner and outer deadlines expired before their continuations ran. Suspending a Linux subprocess reproduced the failure in all three trials. The fix removes the competing diagnostic timer and makes the CLI host the sole output owner. Independent suspended-process trials then returned exactly one observed-lock timeout record and exit 5 in all three cases; SIGINT retained empty stdout and exit 130. A fresh hosted matrix is required for this fix. [Third hosted dispatch](https://github.com/podkolzzzin/tgcli/actions/runs/44815074699)
+The third dispatch passed every packaged gate on Linux and Windows, including the Windows inherited ACL check. Intel macOS exposed a diagnostic publication race: exit 5 could arrive without its JSON record when both the inner and outer deadlines expired before their continuations ran. Suspending a Linux subprocess reproduced the failure in all three trials. The fix removes the competing diagnostic timer and makes the CLI host the sole output owner. Independent suspended-process trials then returned exactly one observed-lock timeout record and exit 5 in all three cases; SIGINT retained empty stdout and exit 130. The fourth matrix below verified this fix. [Third hosted dispatch](https://github.com/podkolzzzin/tgcli/actions/runs/44815074699)
 
 | Gate | Status |
 | --- | --- |
-| Final release source and artifacts | Pending final verification. Record the exact source commit, Release-mode suite results, all three hosted package jobs, and exact byte counts and SHA-256 values. The results above belong to preliminary runs. The complete matrix must rerun with the diagnostic publication fix; Windows has already passed the corrected ACL gate. |
-| Draft asset readback and publication | Pending tag/source match, notes and checksum verification against downloaded draft assets, and a public release URL. |
-| Actual installation | Pending verified update at the intended runtime path, installed version check, and verification of the selected installed skill update. The candidate's loopback install used a temporary path. |
+| Final release source and artifacts | Passed on tagged source `a77b16333ebd8ee0ae6626b4341cd2a88787f3ba`. The fourth pre-release matrix and the tagged matrix passed on all three operating systems. Artifact hashes and counts are recorded below. |
+| Draft asset readback and publication | The single publisher downloaded all draft assets, verified notes, names and hashes, then published [v8.0.0](https://github.com/podkolzzzin/tgcli/releases/tag/v8.0.0) at `2026-11-20T21:27:45Z`. A separate download of all public assets also matched `SHA256SUMS`. |
+| Actual installation | The verified installer updated `~/.local/bin/tgcli` to `8.0.0`; its bytes match the public Linux asset. A normal online chat-list request returned exit 0, one row, `source: telegram` and a fulfilled bound. All three tracked skill copies and the selected local workflow guidance were updated; 31 CLI examples and the MCP catalog checks passed against the installed binary. |
 | Live Telegram acceptance | Controlled Linux fixture checks passed for first ordinary CLI read after a separate producer write, same-session edit/delete refresh, MCP paging and CLI parity, and a verified attachment download. Scope limits are below. |
+
+### Final tagged verification
+
+The [fourth pre-release matrix](https://github.com/podkolzzzin/tgcli/actions/runs/44817995577) and [tagged release workflow](https://github.com/podkolzzzin/tgcli/actions/runs/44819500591) both succeeded on the exact tagged commit. The tagged workflow produced these results; platform-specific skipped fixtures are counted explicitly.
+
+| Platform | .NET passed / skipped | Python passed / skipped | Packaged checks |
+| --- | ---: | ---: | --- |
+| Linux x64 | 470 / 3 | 24 / 0 | Five CLI/installer cases; four transcription formats and edge cases; modern/legacy MCP; 10 isolated client profiles. |
+| Intel macOS x64 | 462 / 11 | 24 / 0 | Five CLI/installer cases; four transcription formats and edge cases; modern/legacy MCP; 11 isolated client profiles. |
+| Windows x64 | 458 / 15 | 22 / 2 | Five CLI/installer cases including inherited ACL; four transcription formats and edge cases; modern/legacy MCP; 11 isolated client profiles. |
+
+All jobs reported zero failures. NuGet package audits reported no known vulnerable packages; this does not audit every embedded native component. The main checkout passed a fresh 473-test Linux Release run after its fast-forward, with zero failures or skips. Its 41 original changed files were preserved byte-for-byte in the baseline commit and additional backups before integration.
+
+| Public asset | Bytes | Verified SHA-256 |
+| --- | ---: | --- |
+| `tgcli-linux-x64` | 389,077,109 | `adf2de58b1e104ed0b4f8e3b638a8580b2cf7e519e3ca637e625dd79ad5b5e2a` |
+| `tgcli-osx-x64` | 361,437,094 | `8314bb5cdb903bede8bf412325ece03e75951adc4f98a517fecf284df09bccc5` |
+| `tgcli-win-x64.exe` | 383,100,105 | `a5c68abe9e5187d189eab25a57587968ab0cd20f9faf5d33c70fec0f8d0b07f5` |
+
+The installed Linux executable matches the Linux digest above. The initial installed diagnostic observed valid authorization with `ConnectionStateUpdating` and returned exit 1 with `connection_unavailable`; it did not claim readiness. The subsequent ordinary online read completed successfully without repair flags, authorization resets or manual cache operations. Diagnostics reports the observed connection state, while ordinary online reads wait for readiness. The working authorization was retained.
+
+The final local package after the diagnostic fix also passed the suspended-process regression: the normal control and three delayed runs each produced one observed-lock JSON record with exit 5; SIGINT produced no stdout and exit 130. Live freshness and edit/delete evidence below was collected on the earlier `cd1d2f7` artifact. The later production change concerns diagnostic publication, and those live observations are not relabeled as tests of downloaded release bytes.
 
 The [package workflow](../../.github/workflows/package.yml) uses the [shared build recipe](../../tools/build_release.py). The [release workflow](../../.github/workflows/release.yml) waits for its three required package jobs, then checks the tag, notes, checksums and downloaded draft assets. The [installer](../../tools/install.py) verifies a candidate before replacing the executable. The x64 package matrix does not establish ARM support.
 
