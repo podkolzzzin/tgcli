@@ -13,6 +13,8 @@ public sealed class BotCommandsTests
 {
     private const long BotUserId = 81;
     private const long ChatId = 91;
+    private const long ManagedUserId = 12345;
+    private const long ManagedChatId = 95;
     private const string TokenBody = "12345:abcdefghijklmnopqrstu";
 
     [Theory]
@@ -360,6 +362,195 @@ public sealed class BotCommandsTests
     public void TokenParserAcceptsColonAsDelimitingPunctuation() =>
         Assert.Equal(TokenBody + "-", BotConversation.ExtractToken($"New token:{TokenBody}-."));
 
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task SupersededDeletePromptDoesNotSendAnUnboundConfirmation(bool observesOutgoingSelection)
+    {
+        using var fixture = new Fixture();
+        var transport = fixture.Transport;
+        transport.Send = text =>
+        {
+            if (text == "/deletebot")
+                transport.Messages.Add(Reply(101, "Choose a bot to delete:", Inline(Button("@example_bot"))));
+            else
+                transport.Messages.Add(Reply(106, "The bot is gone."));
+            return Task.FromResult(Outgoing(text == "/deletebot" ? 100 : 105));
+        };
+        transport.Click = (_, _) =>
+        {
+            transport.Messages.Add(Reply(102, "Are you sure you want to delete @example_bot? Type Yes, I am totally sure."));
+            return Task.FromResult(new TdApi.CallbackQueryAnswer());
+        };
+        var reads = 0;
+        transport.History = () =>
+        {
+            if (transport.Writes.Count == 2 && ++reads == 2)
+            {
+                if (observesOutgoingSelection)
+                    transport.Messages.Add(Reply(103, "@other_bot", outgoing: true, userId: 1));
+                transport.Messages.Add(Reply(104, "Are you sure you want to delete @other_bot? Type Yes, I am totally sure."));
+            }
+            return transport.Messages;
+        };
+
+        await Assert.ThrowsAsync<BotWorkflowException>(() => fixture.Commands.Remove("example_bot", confirm: true));
+        Assert.Equal(new[] { "send:/deletebot", "click:101" }, transport.Writes);
+        Assert.Equal("outcome_unknown", fixture.Result.Value<string>("status"));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task AnonymousDeleteReceiptRequiresADirectLinkToTheAction(bool hasReplyLink)
+    {
+        using var fixture = new Fixture();
+        var transport = fixture.Transport;
+        transport.Send = _ =>
+        {
+            transport.Messages.Add(Reply(101, "Choose a bot to delete:", Inline(Button("@example_bot", 5))));
+            return Task.FromResult(Outgoing(100));
+        };
+        transport.Click = (_, data) =>
+        {
+            transport.Messages.Add(data.Single() == 5
+                ? Reply(102, "Are you sure you want to delete @example_bot?", Inline(Button("Yes, I am totally sure.", 7)))
+                : Reply(103, "The bot is gone.", replyToId: hasReplyLink ? 102 : null));
+            return Task.FromResult(new TdApi.CallbackQueryAnswer());
+        };
+
+        if (hasReplyLink)
+            await fixture.Commands.Remove("example_bot", confirm: true);
+        else
+            await Assert.ThrowsAsync<BotWorkflowException>(() => fixture.Commands.Remove("example_bot", confirm: true));
+        Assert.Equal(hasReplyLink ? "confirmed" : "outcome_unknown", fixture.Result.Value<string>("status"));
+        Assert.Equal(new[] { "send:/deletebot", "click:101", "click:102" }, transport.Writes);
+    }
+
+    [Theory]
+    [InlineData(" for t.me/other_bot", TokenBody, false)]
+    [InlineData("", "67890:abcdefghijklmnopqrstu", false)]
+    [InlineData("", TokenBody, true)]
+    public async Task CreateDoesNotReturnTokensUnboundToItsCreationReceipt(string account, string token, bool tokenFirst)
+    {
+        using var fixture = new Fixture();
+        var transport = fixture.Transport;
+        transport.Send = text =>
+        {
+            var id = 100 * transport.Writes.Count;
+            if (id < 300)
+                transport.Messages.Add(Reply(id + 1, id == 100 ? "Choose a name for your bot." : "Choose a username for your bot."));
+            else
+            {
+                transport.Messages.Add(Reply(tokenFirst ? 302 : 301, "Done! Congratulations on your new bot at t.me/example_bot."));
+                transport.Messages.Add(Reply(tokenFirst ? 301 : 302, $"Use this token to access the HTTP API{account}: {token}."));
+            }
+            return Task.FromResult(Outgoing(id));
+        };
+
+        await Assert.ThrowsAsync<BotWorkflowException>(() => fixture.Commands.Create("Example", "example_bot"));
+        Assert.Equal("outcome_unknown", fixture.Result.Value<string>("status"));
+        Assert.Equal(JTokenType.Null, fixture.Result["token"].Type);
+        Assert.DoesNotContain(token, fixture.Output.ToString());
+    }
+
+    [Fact]
+    public async Task RevokeCannotCombineAnAcknowledgementWithAnUnthreadedOrdinaryTokenForTheSameBot()
+    {
+        using var fixture = new Fixture();
+        var transport = fixture.Transport;
+        transport.Send = _ =>
+        {
+            transport.Messages.Add(Reply(101, "Choose a bot to revoke its token:", Inline(Button("@example_bot"))));
+            return Task.FromResult(Outgoing(100));
+        };
+        transport.Click = (_, _) =>
+        {
+            transport.Messages.Add(Reply(102, "Your old token was revoked for @example_bot."));
+            transport.Messages.Add(Reply(103, $"Here is the token for @example_bot: {TokenBody}."));
+            return Task.FromResult(new TdApi.CallbackQueryAnswer());
+        };
+
+        await Assert.ThrowsAsync<BotWorkflowException>(() => fixture.Commands.Token("example_bot", revoke: true, format: "json"));
+        Assert.Equal("outcome_unknown", fixture.Result.Value<string>("status"));
+        Assert.Equal(JTokenType.Null, fixture.Result["token"].Type);
+        Assert.Equal(JTokenType.Null, fixture.Result["revoked"].Type);
+    }
+
+    [Fact]
+    public async Task RevokeAcceptsAnExplicitRotationAndVerifiedNewTokenInOneResponse()
+    {
+        using var fixture = new Fixture();
+        var transport = fixture.Transport;
+        transport.Send = _ =>
+        {
+            transport.Messages.Add(Reply(101, "Choose a bot to revoke its token:", Inline(Button("@example_bot"))));
+            return Task.FromResult(Outgoing(100));
+        };
+        transport.Click = (_, _) =>
+        {
+            transport.Messages.Add(Reply(102, $"Your old token was revoked. Your new token is: {TokenBody}-."));
+            return Task.FromResult(new TdApi.CallbackQueryAnswer());
+        };
+
+        await fixture.Commands.Token("example_bot", revoke: true, format: "json");
+        Assert.Equal("confirmed", fixture.Result.Value<string>("status"));
+        Assert.Equal(TokenBody + "-", fixture.Result.Value<string>("token"));
+        Assert.True(fixture.Result.Value<bool>("revoked"));
+    }
+
+    [Theory]
+    [InlineData(" for t.me/other_bot", TokenBody)]
+    [InlineData("", "67890:abcdefghijklmnopqrstu")]
+    public async Task TokenFetchDoesNotReturnCredentialsForAnotherBot(string account, string token)
+    {
+        using var fixture = new Fixture();
+        var transport = fixture.Transport;
+        transport.Send = _ =>
+        {
+            transport.Messages.Add(Reply(101, "Choose a bot to get its token:", Inline(Button("@example_bot"))));
+            return Task.FromResult(Outgoing(100));
+        };
+        transport.Click = (_, _) =>
+        {
+            transport.Messages.Add(Reply(102, $"Here is the token{account}: {token}."));
+            return Task.FromResult(new TdApi.CallbackQueryAnswer());
+        };
+
+        await Assert.ThrowsAsync<BotWorkflowException>(() => fixture.Commands.Token("example_bot", format: "json"));
+        Assert.Equal("outcome_unknown", fixture.Result.Value<string>("status"));
+        Assert.Equal(JTokenType.Null, fixture.Result["token"].Type);
+        Assert.DoesNotContain(token, fixture.Output.ToString());
+    }
+
+    [Fact]
+    public async Task DifferentActiveUsernameIsRejectedBeforeRevocation()
+    {
+        using var fixture = new Fixture();
+        fixture.Transport.ManagedUser.Usernames.ActiveUsernames = ["unrelated_bot"];
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => fixture.Commands.Token("example_bot", revoke: true));
+        Assert.Empty(fixture.Transport.Writes);
+    }
+
+    [Fact]
+    public async Task ConcurrentBotFatherCommandDoesNotTurnUnthreadedRejectionIntoFailure()
+    {
+        using var fixture = new Fixture();
+        var transport = fixture.Transport;
+        transport.Send = _ =>
+        {
+            transport.Messages.Add(Reply(101, "/other", outgoing: true, userId: 1));
+            transport.Messages.Add(Reply(102, "Unknown command."));
+            transport.Messages.Add(Reply(103, "Choose a name for your bot."));
+            return Task.FromResult(Outgoing(100));
+        };
+
+        await Assert.ThrowsAsync<BotWorkflowException>(() => fixture.Commands.Create("Example", "example_bot"));
+        Assert.Equal("outcome_unknown", fixture.Result.Value<string>("status"));
+        Assert.Equal(new[] { "send:/newbot" }, transport.Writes);
+    }
+
     [Fact]
     public async Task TimeoutWithoutAnySendReceiptStillReportsUnknownAndDoesNotRetry()
     {
@@ -423,7 +614,7 @@ public sealed class BotCommandsTests
             if (response is not null)
             {
                 var text = response.Contains("API:") || response.Contains("was not revoked") ? response + " " + TokenBody : response;
-                transport.Messages.Add(Reply(103, text));
+                transport.Messages.Add(Reply(103, text, replyToId: 101));
             }
             return Task.FromResult(new TdApi.CallbackQueryAnswer { Text = string.Empty });
         };
@@ -447,8 +638,8 @@ public sealed class BotCommandsTests
         };
         transport.Click = (_, _) =>
         {
-            transport.Messages.Add(Reply(102, "Your old token was revoked."));
-            transport.Messages.Add(Reply(103, $"Use this token to access the HTTP API: {TokenBody}-"));
+            transport.Messages.Add(Reply(102, "Your old token was revoked.", replyToId: 101));
+            transport.Messages.Add(Reply(103, $"Use this token to access the HTTP API: {TokenBody}-", replyToId: 101));
             return Task.FromResult(new TdApi.CallbackQueryAnswer { Text = string.Empty });
         };
         await fixture.Commands.Token("example_bot", revoke: true, format: "json");
@@ -470,7 +661,7 @@ public sealed class BotCommandsTests
                 "/newbot" => "Choose a name for your bot.",
                 "Example" => "Choose a username for your bot.",
                 _ => "Sorry, this username is already taken. Please try something different."
-            }));
+            }, replyToId: id));
             return Task.FromResult(Outgoing(id));
         };
 
@@ -494,13 +685,16 @@ public sealed class BotCommandsTests
     }
 
     private static TdApi.Message Reply(long id, string text, TdApi.ReplyMarkup markup = null,
-        int editDate = 0, bool outgoing = false, long userId = BotUserId) => new()
+        int editDate = 0, bool outgoing = false, long userId = BotUserId, long? replyToId = null) => new()
     {
         Id = id,
         ChatId = ChatId,
         SenderId = new TdApi.MessageSender.MessageSenderUser { UserId = userId },
         Content = new TdApi.MessageContent.MessageText { Text = new TdApi.FormattedText { Text = text, Entities = [] } },
         ReplyMarkup = markup,
+        ReplyTo = replyToId is long target
+            ? new TdApi.MessageReplyTo.MessageReplyToMessage { ChatId = ChatId, MessageId = target }
+            : null,
         Date = 2,
         EditDate = editDate,
         IsOutgoing = outgoing
@@ -570,10 +764,26 @@ public sealed class BotCommandsTests
                 OldMessageId = temporaryId, Message = Outgoing(500), Error = new TdApi.Error { Code = 400, Message = "Rejected" }
             });
 
-        public Task<TdApi.Chat> SearchAsync(string username) =>
-            Task.FromResult(new TdApi.Chat { Id = ChatId, Type = new TdApi.ChatType.ChatTypePrivate { UserId = User.Id } });
+        private bool _botFatherDialog;
+        internal TdApi.User ManagedUser = new()
+        {
+            Id = ManagedUserId,
+            Type = new TdApi.UserType.UserTypeBot { CanBeEdited = true },
+            Usernames = new TdApi.Usernames { ActiveUsernames = ["example_bot"] },
+            FirstName = "Managed"
+        };
+        public Task<TdApi.Chat> SearchAsync(string username)
+        {
+            var managed = _botFatherDialog && username != "BotFather";
+            _botFatherDialog |= username == "BotFather";
+            return Task.FromResult(new TdApi.Chat
+            {
+                Id = managed ? ManagedChatId : ChatId,
+                Type = new TdApi.ChatType.ChatTypePrivate { UserId = managed ? ManagedUser.Id : User.Id }
+            });
+        }
 
-        public Task<TdApi.User> UserAsync(long userId) => Task.FromResult(User);
+        public Task<TdApi.User> UserAsync(long userId) => Task.FromResult(userId == ManagedUser.Id ? ManagedUser : User);
         public Task<TdApi.UserFullInfo> UserFullInfoAsync(long userId) => Task.FromResult(new TdApi.UserFullInfo());
         public Task<long[]> OwnedBotsAsync() => Task.FromResult(new[] { User.Id });
         public Task<TdApi.Message> MessageAsync(long chatId, long messageId) =>

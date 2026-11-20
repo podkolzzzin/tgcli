@@ -236,7 +236,7 @@ public sealed class BotCommands
         BotWorkflowException? failure = null;
         try
         {
-            token = await new BotFatherFlow(dialog, username).RunAsync(operation, name);
+            token = await new BotFatherFlow(dialog, username, ResolveTargetAsync).RunAsync(operation, name);
         }
         catch (BotWorkflowException error)
         {
@@ -272,6 +272,15 @@ public sealed class BotCommands
         }
 
         PrintOutcome(payload, dialog, format, "confirmed", token ?? response, failure);
+
+        async Task<long> ResolveTargetAsync()
+        {
+            var (_, target) = await ResolveBotAsync(tg, username, timeout.Token);
+            if (target.Type is not TdApi.UserType.UserTypeBot { CanBeEdited: true }
+                || target.Usernames?.ActiveUsernames?.Contains(username, StringComparer.OrdinalIgnoreCase) != true)
+                throw new InvalidOperationException($"@{username} did not resolve to an owned bot with that active username.");
+            return target.Id;
+        }
     }
 
     private void PrintOutcome(JObject payload, BotConversation dialog, string format, string status, string plain,

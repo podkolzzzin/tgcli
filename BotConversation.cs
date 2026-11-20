@@ -140,14 +140,17 @@ internal sealed class BotConversation(
     }
 
     internal async Task<TdApi.Message> WaitForAsync(
-        Snapshot snapshot, ActionTarget action, Func<TdApi.Message, bool> matches, string expected)
+        Snapshot snapshot, ActionTarget action, Func<TdApi.Message, bool> matches, string expected,
+        Action<IReadOnlyList<TdApi.Message>>? observe = null)
     {
         var seen = new Dictionary<long, string>();
         try
         {
             while (true)
             {
-                foreach (var message in await HistoryAsync(50))
+                var history = await HistoryAsync(50);
+                observe?.Invoke(history);
+                foreach (var message in history)
                 {
                     if (!IsFromBot(message))
                         continue;
@@ -174,17 +177,22 @@ internal sealed class BotConversation(
 
     private bool IsCurrentReply(TdApi.Message message, string revision, Snapshot snapshot, ActionTarget action)
     {
-        var reply = message.ReplyTo as TdApi.MessageReplyTo.MessageReplyToMessage;
-        var directReply = reply is not null
-            && (reply.ChatId == 0 || reply.ChatId == chatId) && reply.MessageId == action.MessageId;
+        var directReply = IsDirectReply(message, action);
 
         if (snapshot.Revisions.TryGetValue(message.Id, out var baseline))
             return revision != baseline && (message.Id == action.EditableMessageId || directReply);
 
         return message.Id > snapshot.NewestId
             && (!action.IsSend || message.Id > action.MessageId)
-            && (reply is null || directReply);
+            && (message.ReplyTo is not TdApi.MessageReplyTo.MessageReplyToMessage || directReply);
     }
+
+    internal bool IsActionBound(TdApi.Message message, ActionTarget action) =>
+        IsDirectReply(message, action) || !action.IsSend && message.Id == action.MessageId;
+
+    private bool IsDirectReply(TdApi.Message message, ActionTarget action) =>
+        message.ReplyTo is TdApi.MessageReplyTo.MessageReplyToMessage reply
+        && (reply.ChatId == 0 || reply.ChatId == chatId) && reply.MessageId == action.MessageId;
 
     private static string Revision(TdApi.Message message) => new JObject
     {
@@ -230,8 +238,11 @@ internal sealed class BotConversation(
     internal static string? ExtractToken(string text)
     {
         var match = TokenPattern.Match(text);
-        return match.Success ? match.Value : null;
+        return match.Success && !match.NextMatch().Success ? match.Value : null;
     }
+
+    internal static bool TokenBelongsTo(string token, long userId) =>
+        token.AsSpan(0, token.IndexOf(':')).SequenceEqual(userId.ToString(CultureInfo.InvariantCulture));
 
     internal static string RedactTokens(string text) => TokenPattern.Replace(text, "[redacted token]");
 
