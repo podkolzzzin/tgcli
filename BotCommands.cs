@@ -8,7 +8,7 @@ namespace TgCli;
 
 public sealed class BotCommands
 {
-    private readonly Func<string?, Task<IBotTransport>> _open;
+    private readonly Func<string?, CancellationToken, Task<IBotTransport>> _open;
     private readonly TextWriter? _output;
     private readonly TimeSpan _timeout;
     private readonly TimeSpan _pollInterval;
@@ -16,6 +16,9 @@ public sealed class BotCommands
     public BotCommands() : this(TdBotTransport.OpenAsync, null, TimeSpan.FromSeconds(60), TimeSpan.FromMilliseconds(300)) { }
 
     internal BotCommands(Func<string?, Task<IBotTransport>> open, TextWriter? output, TimeSpan timeout, TimeSpan pollInterval)
+        : this((session, _) => open(session), output, timeout, pollInterval) { }
+
+    private BotCommands(Func<string?, CancellationToken, Task<IBotTransport>> open, TextWriter? output, TimeSpan timeout, TimeSpan pollInterval)
     {
         _open = open;
         _output = output;
@@ -68,9 +71,12 @@ public sealed class BotCommands
     public async Task List(string format = "tsv", string? session = null)
     {
         format = ValidateFormat(format);
-        await using var tg = await _open(session);
-        using var timeout = new CancellationTokenSource(_timeout);
-        await PrintBotRowsAsync(tg, await tg.OwnedBotsAsync().WaitAsync(timeout.Token), format, timeout.Token);
+        using var timeout = StartStandaloneDeadline();
+        var deadline = timeout?.Token ?? CliExecution.CancellationToken;
+        deadline.ThrowIfCancellationRequested();
+        await using var tg = await _open(session, deadline);
+        deadline.ThrowIfCancellationRequested();
+        await PrintBotRowsAsync(tg, await tg.OwnedBotsAsync().WaitAsync(deadline), format, deadline);
     }
 
     /// <summary>
@@ -116,9 +122,11 @@ public sealed class BotCommands
         if (limit is < 1 or > 100)
             throw new ArgumentOutOfRangeException(nameof(limit), "Limit must be between 1 and 100.");
 
-        await using var tg = await _open(session);
-        using var timeout = new CancellationTokenSource(_timeout);
-        var deadline = timeout.Token;
+        using var timeout = StartStandaloneDeadline();
+        var deadline = timeout?.Token ?? CliExecution.CancellationToken;
+        deadline.ThrowIfCancellationRequested();
+        await using var tg = await _open(session, deadline);
+        deadline.ThrowIfCancellationRequested();
         var (chatId, user) = await ResolveBotAsync(tg, username, deadline);
         var bot = await ToBotJsonAsync(tg, user, deadline);
         var dialog = new BotConversation(tg, chatId, user.Id, deadline, _pollInterval);
@@ -210,28 +218,33 @@ public sealed class BotCommands
             historyStatus = "last_observed";
         }
 
-        var history = dialog.Recent.TakeLast(limit).ToArray();
+        var history = dialog.Recent.TakeLast(limit).OrderBy(message => message.Date)
+            .ThenBy(message => message.ChatId).ThenBy(message => message.Id).ToArray();
         var payload = new JObject
         {
             ["bot"] = bot,
-            ["chat_id"] = chatId,
-            ["sent_message_id"] = IdValue(sentId),
-            ["reply_message_id"] = IdValue(replyId),
+            ["chat_id"] = Wire.Id(chatId),
+            ["sent_message_id"] = Wire.NullableId(sentId),
+            ["reply_message_id"] = Wire.NullableId(replyId),
             ["click"] = clickResult is null ? JValue.CreateNull() : clickResult,
             ["messages"] = new JArray(history.Select(ToMessageJson)),
             ["history_status"] = historyStatus
         };
-        var plain = string.Join(Environment.NewLine, history.Reverse()
+        var plain = string.Join(Environment.NewLine, history
             .Select(message => MessageFiles.GetMessageText(message.Content)).Where(value => !string.IsNullOrWhiteSpace(value)));
+        tg.CheckActive();
         PrintOutcome(payload, dialog, format, status, plain, failure, reason);
     }
 
     private async Task RunBotFatherAsync(BotFatherOperation operation, string username, string format, string? session, string? name = null)
     {
-        await using var tg = await _open(session);
-        using var timeout = new CancellationTokenSource(_timeout);
-        var (chatId, user) = await ResolveBotAsync(tg, "BotFather", timeout.Token);
-        var dialog = new BotConversation(tg, chatId, user.Id, timeout.Token, _pollInterval);
+        using var timeout = StartStandaloneDeadline();
+        var deadline = timeout?.Token ?? CliExecution.CancellationToken;
+        deadline.ThrowIfCancellationRequested();
+        await using var tg = await _open(session, deadline);
+        deadline.ThrowIfCancellationRequested();
+        var (chatId, user) = await ResolveBotAsync(tg, "BotFather", deadline);
+        var dialog = new BotConversation(tg, chatId, user.Id, deadline, _pollInterval);
         string? token = null;
         BotWorkflowException? failure = null;
         try
@@ -252,8 +265,8 @@ public sealed class BotCommands
         var payload = new JObject
         {
             ["username"] = username,
-            ["botfather_chat_id"] = chatId,
-            ["message_id"] = IdValue(reply?.Id),
+            ["botfather_chat_id"] = Wire.Id(chatId),
+            ["message_id"] = Wire.NullableId(reply?.Id),
             ["botfather_reply"] = BotConversation.RedactTokens(response),
             ["ui"] = reply is null ? JValue.CreateNull() : ExtractUi(reply)
         };
@@ -271,11 +284,12 @@ public sealed class BotCommands
                 receipt["answer_text"] = BotConversation.RedactTokens(answer);
         }
 
+        tg.CheckActive();
         PrintOutcome(payload, dialog, format, "confirmed", token ?? response, failure);
 
         async Task<long> ResolveTargetAsync()
         {
-            var (_, target) = await ResolveBotAsync(tg, username, timeout.Token);
+            var (_, target) = await ResolveBotAsync(tg, username, deadline);
             if (target.Type is not TdApi.UserType.UserTypeBot { CanBeEdited: true }
                 || target.Usernames?.ActiveUsernames?.Contains(username, StringComparer.OrdinalIgnoreCase) != true)
                 throw new InvalidOperationException($"@{username} did not resolve to an owned bot with that active username.");
@@ -286,6 +300,7 @@ public sealed class BotCommands
     private void PrintOutcome(JObject payload, BotConversation dialog, string format, string status, string plain,
         BotWorkflowException? failure, string? reason = null)
     {
+        CliExecution.CancellationToken.ThrowIfCancellationRequested();
         status = failure?.Status ?? status;
         reason = failure?.Message ?? reason;
         payload["status"] = status;
@@ -309,7 +324,8 @@ public sealed class BotCommands
         return (chat.Id, user);
     }
 
-    private static JValue IdValue(long? id) => id is long value ? new JValue(value) : JValue.CreateNull();
+    private CancellationTokenSource? StartStandaloneDeadline() =>
+        CliExecution.CancellationToken.CanBeCanceled ? null : new CancellationTokenSource(_timeout);
 
     private static string ValidateFormat(string? format)
     {
@@ -358,21 +374,9 @@ public sealed class BotCommands
 
     private static JObject ToMessageJson(TdApi.Message message)
     {
-        return new JObject
-        {
-            ["chat_id"] = message.ChatId,
-            ["message_id"] = message.Id,
-            ["date"] = DateTimeOffset.FromUnixTimeSeconds(message.Date).ToString("O", CultureInfo.InvariantCulture),
-            ["sender"] = message.SenderId switch
-            {
-                TdApi.MessageSender.MessageSenderUser user => $"user:{user.UserId}",
-                TdApi.MessageSender.MessageSenderChat chat => $"chat:{chat.ChatId}",
-                _ => string.Empty
-            },
-            ["kind"] = MessageFiles.GetKind(message.Content),
-            ["text"] = MessageFiles.GetMessageText(message.Content),
-            ["ui"] = ExtractUi(message)
-        };
+        var record = ExportSchema.BuildObservedMessage(message);
+        record["ui"] = ExtractUi(message);
+        return record;
     }
 
     internal static JObject ToInlineButtonJson(TdApi.InlineKeyboardButton button, int? row = null, int? column = null)
@@ -409,6 +413,8 @@ public sealed class BotCommands
             rows.Add(await ToBotJsonAsync(tg, await tg.UserAsync(userId).WaitAsync(deadline), deadline));
         }
 
+        tg.CheckActive();
+        deadline.ThrowIfCancellationRequested();
         PrintRows(rows, format);
     }
 
@@ -429,7 +435,7 @@ public sealed class BotCommands
 
         return new JObject
         {
-            ["user_id"] = user.Id,
+            ["user_id"] = Wire.Id(user.Id),
             ["name"] = name,
             ["username"] = username,
             ["is_bot"] = user.Type is TdApi.UserType.UserTypeBot,

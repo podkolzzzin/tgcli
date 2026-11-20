@@ -93,6 +93,45 @@ public sealed class BotCommandsTests
         Assert.True(bot.Value<bool>("is_bot"));
     }
 
+    [Fact]
+    public async Task TransportThatFinishesOpeningAfterDeadlineCannotPrintBotList()
+    {
+        using var stdout = new StringWriter();
+        var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var disposed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var transport = new ScriptTransport { OnDispose = () => disposed.TrySetResult() };
+        var commands = new BotCommands(async _ =>
+        {
+            started.SetResult();
+            await release.Task;
+            return transport;
+        }, stdout, TimeSpan.FromSeconds(5), TimeSpan.FromMilliseconds(1));
+        var run = CliExecution.RunAsync(_ => commands.List(format: "json"), TimeSpan.FromSeconds(1), TestContext.Current.CancellationToken);
+        try
+        {
+            await started.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+            await Assert.ThrowsAsync<TimeoutException>(() => run);
+        }
+        finally { release.TrySetResult(); }
+        await disposed.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+        Assert.Empty(stdout.ToString());
+    }
+
+    [Fact]
+    public async Task BotHistoryUsesSchemaEightAndDecimalReceiptIdentifiers()
+    {
+        using var fixture = new Fixture();
+        fixture.Transport.Messages.Add(Reply(9007199254740993, "Choose", Inline(Button("Run"))));
+        await fixture.Commands.Write("example_bot", click: "Run", messageId: 9007199254740993);
+        Assert.Equal(JTokenType.String, fixture.Result["chat_id"].Type);
+        Assert.Equal(JTokenType.String, fixture.Result["click"]["message_id"].Type);
+        var record = Assert.Single(fixture.Result["messages"]);
+        Assert.Equal("8.0", record.Value<string>("schema_version"));
+        Assert.Equal("9007199254740993", record.Value<string>("message_id"));
+        Assert.Equal(JTokenType.String, record["message_id"].Type);
+    }
+
     [Theory]
     [InlineData("duplicate")]
     [InlineData("noncallback")]
@@ -812,6 +851,11 @@ public sealed class BotCommandsTests
             return Click(messageId, data);
         }
 
-        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+        internal Action OnDispose { get; init; }
+        public ValueTask DisposeAsync()
+        {
+            OnDispose?.Invoke();
+            return ValueTask.CompletedTask;
+        }
     }
 }

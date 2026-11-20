@@ -76,7 +76,7 @@ internal sealed class BotConversation(
                     ? ConfirmSend(receipt, message.Id)
                     : throw Unknown(receipt, "Telegram returned an invalid final send receipt.");
 
-            receipt["temporary_message_id"] = message.Id;
+            receipt["temporary_message_id"] = Wire.Id(message.Id);
             if (message.SendingState is TdApi.MessageSendingState.MessageSendingStateFailed)
                 throw Failure(receipt, "Telegram rejected the message.");
 
@@ -124,7 +124,7 @@ internal sealed class BotConversation(
         {
             ["step"] = step,
             ["type"] = "callback",
-            ["message_id"] = targetId,
+            ["message_id"] = Wire.Id(targetId),
             ["button"] = BotCommands.ToInlineButtonJson(button)
         };
         Receipts.Add(receipt);
@@ -209,7 +209,7 @@ internal sealed class BotConversation(
     private static long ConfirmSend(JObject receipt, long id)
     {
         receipt["status"] = "confirmed";
-        receipt["sent_message_id"] = id;
+        receipt["sent_message_id"] = Wire.Id(id);
         return id;
     }
 

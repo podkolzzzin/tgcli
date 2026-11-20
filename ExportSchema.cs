@@ -31,8 +31,34 @@ internal static class ExportSchema
             file => MediaTranscription.DownloadAsync(tg, file, cancellationToken, local, message.ChatId, message.Id),
             cancellationToken);
 
-        await AttachmentIndex.RecordAsync(tg.SessionDirectory, message.ChatId, message.Id, attachments);
+        if (attachments.Count != 0)
+            await AttachmentIndex.RecordAsync(tg.SessionDirectory, message.ChatId, message.Id, attachments);
         cancellationToken.ThrowIfCancellationRequested();
+        return BuildRecord(item, sender, replyChatId, replyMessageId, replyPreview, links, files, query);
+    }
+
+    // Some surfaces already have an observed message without an enrichment client, such as a bot receipt.
+    internal static JObject BuildObservedMessage(TdApi.Message message)
+    {
+        var (replyChatId, replyMessageId) = GetReplyTarget(message);
+        var reply = replyChatId is not null && replyMessageId is not null ? new JObject
+        {
+            ["chat_id"] = Wire.NullableId(replyChatId),
+            ["message_id"] = Wire.NullableId(replyMessageId),
+            ["resolved"] = false,
+            ["error"] = JValue.CreateNull()
+        } : (JToken)JValue.CreateNull();
+        var attachments = new JArray(MessageFiles.GetAllFiles(message).Select(file => ToAttachmentJson(file,
+            MessageFiles.GetCaption(message.Content), generatedText: null)));
+        return BuildRecord(Output.ToExportedMessage(message), GetSenderIdentity(message.SenderId), replyChatId, replyMessageId,
+            reply, Wire.LocalLink(message.ChatId, message.Id), attachments, query: null);
+    }
+
+    private static JObject BuildRecord(ExportedMessage item,
+        (string Type, long? UserId, long? ChatId, string? DisplayName, string? Username) sender,
+        long? replyChatId, long? replyMessageId, JToken replyPreview, MessageLinkInfo? links, JArray files, string? query)
+    {
+        var message = item.Message;
         var metrics = ToMetricsJson(message.InteractionInfo);
 
         return new JObject
