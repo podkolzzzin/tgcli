@@ -1,5 +1,6 @@
-using System.Runtime.InteropServices;
+using System.Collections.Concurrent;
 using System.ComponentModel.DataAnnotations;
+using System.Runtime.InteropServices;
 using System.Text.Json;
 using TdLib;
 
@@ -7,37 +8,99 @@ namespace TgCli;
 
 internal sealed class TelegramSession : IAsyncDisposable
 {
-    private readonly SessionConfig _config;
-    private SessionLockLease? _lease;
-    private TdApi.AuthorizationState? _authorizationState;
-    private TaskCompletionSource<TdApi.AuthorizationState> _authorizationChanged = NewAuthorizationChangedSource();
-    private readonly TelegramConnection _connection = new();
+    private static readonly TimeSpan StartupTimeout = TimeSpan.FromSeconds(60);
+    private static readonly TimeSpan AuthorizationTimeout = TimeSpan.FromSeconds(20);
+    private static readonly TimeSpan ConnectionTimeout = TimeSpan.FromSeconds(30);
+    private static readonly TimeSpan ShutdownTimeout = TimeSpan.FromSeconds(10);
+    private static readonly TimeSpan LoginInputTimeout = TimeSpan.FromMinutes(5);
+    private static readonly ConcurrentBag<TelegramSession> FailedNativeShutdowns = new();
 
-    private TelegramSession(TdClient client, SessionConfig config)
+    private readonly ITelegramSessionNative _native;
+    private readonly SessionConfig _config;
+    private readonly SessionLockLease _lease;
+    private readonly TimeSpan _shutdownTimeout;
+    private readonly SemaphoreSlim _nativeGate = new(1, 1);
+    private readonly object _stateGate = new();
+    private readonly CancellationTokenSource _authorizationLost = new();
+    private readonly TelegramConnection _connection = new();
+    private TdApi.AuthorizationState? _authorizationState;
+    private TaskCompletionSource _authorizationChanged = NewAuthorizationSignal();
+    private TelegramAuthorizationFailure? _terminalReason;
+    private bool _wasAuthorized;
+    private Task? _disposeTask;
+
+    private TelegramSession(ITelegramSessionNative native, SessionConfig config, SessionLockLease lease,
+        TimeSpan shutdownTimeout)
     {
-        Client = client;
+        _native = native;
         _config = config;
-        Client.UpdateReceived += OnUpdateReceived;
+        _lease = lease;
+        _shutdownTimeout = shutdownTimeout;
+        _native.UpdateReceived += OnUpdateReceived;
     }
 
-    public TdClient Client { get; }
+    public TdClient Client => _native.Client ?? throw new InvalidOperationException("No TDLib client is available.");
     public string SessionDirectory => _config.RootDirectory;
     public string DatabaseDirectory => _config.DatabaseDirectory;
     public string FilesDirectory => _config.FilesDirectory;
     public bool IsConnected => _connection.IsReady;
     public string ConnectionState => _connection.StateName;
-
-    public Task EnsureConnectedAsync(CancellationToken cancellationToken = default) =>
-        _connection.WaitReadyAsync(TimeSpan.FromSeconds(30), cancellationToken);
+    public bool IsAuthorized
+    {
+        get
+        {
+            lock (_stateGate)
+                return _terminalReason is null && _authorizationState is TdApi.AuthorizationState.AuthorizationStateReady;
+        }
+    }
+    public string AuthorizationState
+    {
+        get { lock (_stateGate) return _authorizationState?.GetType().Name ?? "Unknown"; }
+    }
 
     internal static string ResolveSessionDirectory(string? path) =>
         Path.GetFullPath(string.IsNullOrWhiteSpace(path) ? SessionConfig.DefaultRootDirectory() : path);
 
-    public static async Task<TelegramSession> CreateAsync(string? sessionDirectory, int apiId, string? apiHash, bool saveConfig, int lockTimeout = 30, bool noWait = false)
+    public static Task<TelegramSession> CreateAsync(string? sessionDirectory, int apiId, string? apiHash, bool saveConfig,
+        int lockTimeout = 30, bool noWait = false, CancellationToken cancellationToken = default) =>
+        CreateCoreAsync(sessionDirectory, apiId, apiHash, saveConfig, lockTimeout, noWait, TelegramSessionNative.Open,
+            StartupTimeout, ShutdownTimeout, cancellationToken);
+
+    internal static Task<TelegramSession> CreateCoreAsync(string? sessionDirectory, int apiId, string? apiHash, bool saveConfig,
+        int lockTimeout, bool noWait, Func<ITelegramSessionNative> openNative, TimeSpan startupTimeout, TimeSpan shutdownTimeout,
+        CancellationToken cancellationToken) =>
+        OperationDeadline.RunAsync(ct => Task.Run(() => StartAsync(sessionDirectory, apiId, apiHash, saveConfig,
+            lockTimeout, noWait, openNative, shutdownTimeout, ct), ct), startupTimeout, cancellationToken, "TDLib startup",
+            onAbandoned: static session => session.DisposeWhenDrainedAsync());
+
+    public static Task<TelegramSession> CreateReadyAsync(string? sessionDirectory, int lockTimeout = 30, bool noWait = false,
+        bool local = false, CancellationToken cancellationToken = default) =>
+        OperationDeadline.RunAsync(async ct =>
+        {
+            var session = await CreateAsync(sessionDirectory, apiId: 0, apiHash: null, saveConfig: false,
+                lockTimeout, noWait, ct);
+            try
+            {
+                if (local) await session.EnsureReadyAsync(ct);
+                else await session.EnsureConnectedAsync(ct);
+                return session;
+            }
+            catch
+            {
+                OperationDeadline.Retain(session.DisposeWhenDrainedAsync());
+                throw;
+            }
+        }, StartupTimeout, cancellationToken, "Telegram session readiness",
+            onAbandoned: static session => session.DisposeWhenDrainedAsync());
+
+    private static async Task<TelegramSession> StartAsync(string? sessionDirectory, int apiId, string? apiHash, bool saveConfig,
+        int lockTimeout, bool noWait, Func<ITelegramSessionNative> openNative, TimeSpan shutdownTimeout, CancellationToken ct)
     {
         var root = ResolveSessionDirectory(sessionDirectory);
+        ct.ThrowIfCancellationRequested();
         SessionConfig.CreatePrivateDirectory(root);
-        var acquiredLock = await SessionLock.AcquireAsync(root, TimeSpan.FromSeconds(noWait ? 0 : Math.Max(0, lockTimeout)));
+        var lease = await SessionLock.AcquireAsync(root, TimeSpan.FromSeconds(noWait ? 0 : Math.Max(0, lockTimeout)), ct);
+        ITelegramSessionNative? native = null;
         TelegramSession? session = null;
         try
         {
@@ -45,212 +108,315 @@ internal sealed class TelegramSession : IAsyncDisposable
             var config = SessionConfig.Load(root);
             config.ApplyOverrides(apiId, apiHash);
             config.Validate();
+            ct.ThrowIfCancellationRequested();
             config.EnsureDirectories();
-            if (saveConfig)
-            {
-                config.Save();
-            }
+            if (saveConfig) config.Save();
 
-            DisableTdLibLogging();
-            session = new TelegramSession(new TdClient(), config)
-            {
-                _lease = acquiredLock
-            };
-            await session.InitializeAsync();
+            ct.ThrowIfCancellationRequested();
+            native = openNative();
+            session = new TelegramSession(native, config, lease, shutdownTimeout);
+            await session.InitializeAsync(ct);
+            ct.ThrowIfCancellationRequested();
             return session;
         }
         catch
         {
             if (session is not null)
-            {
-                await session.DisposeAsync();
-            }
+                OperationDeadline.Retain(session.DisposeWhenDrainedAsync());
             else
             {
-                acquiredLock.Dispose();
+                // The client owns no database until TDLib parameters have been applied.
+                try { native?.Dispose(); }
+                finally { lease.Dispose(); }
             }
-
             throw;
         }
     }
 
-    public static async Task<TelegramSession> CreateReadyAsync(string? sessionDirectory, int lockTimeout = 30, bool noWait = false, bool local = false)
+    public Task EnsureReadyAsync(CancellationToken cancellationToken = default) =>
+        OperationDeadline.RunAsync(WaitForAuthorizationAsync, AuthorizationTimeout, cancellationToken, "Telegram authorization");
+
+    public async Task EnsureConnectedAsync(CancellationToken cancellationToken = default)
     {
-        var session = await CreateAsync(sessionDirectory, apiId: 0, apiHash: null, saveConfig: false, lockTimeout, noWait);
+        await EnsureReadyAsync(cancellationToken);
+        using var connectionWait = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _authorizationLost.Token);
         try
         {
-            await session.EnsureReadyAsync();
-            if (!local) await session.EnsureConnectedAsync();
-            return session;
+            await _connection.WaitReadyAsync(ConnectionTimeout, connectionWait.Token);
+            cancellationToken.ThrowIfCancellationRequested();
+            CheckActive();
         }
-        catch
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
         {
-            await session.DisposeAsync();
+            CheckActive();
             throw;
         }
     }
 
-    public async Task LoginAsync(string? phone)
+    private async Task WaitForAuthorizationAsync(CancellationToken token)
     {
+        await RefreshAuthorizationAsync(token);
         while (true)
         {
-            var state = await GetAuthorizationStateAsync();
+            token.ThrowIfCancellationRequested();
+            AuthorizationSnapshot state;
+            lock (_stateGate)
+            {
+                ThrowIfSessionUnusable();
+                state = ReadAuthorization();
+                if (state.State is TdApi.AuthorizationState.AuthorizationStateReady) return;
+                if (NeedsLogin(state.State))
+                    throw new TelegramAuthorizationException(TelegramAuthorizationFailure.LoginRequired,
+                        "Telegram session is not authorized. Run `tgcli login` first.");
+            }
+            await state.Changed.WaitAsync(token);
+        }
+    }
 
-            switch (state)
+    private static bool NeedsLogin(TdApi.AuthorizationState? state) => state is
+        TdApi.AuthorizationState.AuthorizationStateWaitPhoneNumber
+        or TdApi.AuthorizationState.AuthorizationStateWaitCode
+        or TdApi.AuthorizationState.AuthorizationStateWaitPassword
+        or TdApi.AuthorizationState.AuthorizationStateWaitEmailAddress
+        or TdApi.AuthorizationState.AuthorizationStateWaitEmailCode
+        or TdApi.AuthorizationState.AuthorizationStateWaitRegistration
+        or TdApi.AuthorizationState.AuthorizationStateWaitOtherDeviceConfirmation
+        or TdApi.AuthorizationState.AuthorizationStateWaitPremiumPurchase;
+
+    public async Task LoginAsync(string? phone, CancellationToken cancellationToken = default)
+    {
+        await OperationDeadline.RunAsync(async ct => await RefreshAuthorizationAsync(ct),
+            AuthorizationTimeout, cancellationToken, "Reading Telegram login state");
+
+        while (true)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            AuthorizationSnapshot state;
+            lock (_stateGate)
+            {
+                ThrowIfSessionUnusable();
+                state = ReadAuthorization();
+            }
+
+            switch (state.State)
             {
                 case TdApi.AuthorizationState.AuthorizationStateReady:
+                    cancellationToken.ThrowIfCancellationRequested();
                     Console.WriteLine("Logged in.");
                     return;
 
                 case TdApi.AuthorizationState.AuthorizationStateWaitPhoneNumber:
                     phone ??= Prompt("Phone");
-                    await Client.SetAuthenticationPhoneNumberAsync(phone, settings: null!);
+                    await RunLoginRequest(() => Client.SetAuthenticationPhoneNumberAsync(phone, settings: null!), cancellationToken);
                     break;
 
                 case TdApi.AuthorizationState.AuthorizationStateWaitCode waitCode:
-                    await HandleAuthenticationCodeAsync(waitCode.CodeInfo);
+                    await HandleAuthenticationCodeAsync(waitCode.CodeInfo, cancellationToken);
                     break;
 
                 case TdApi.AuthorizationState.AuthorizationStateWaitPassword waitPassword:
                     var passwordPrompt = string.IsNullOrWhiteSpace(waitPassword.PasswordHint)
                         ? "Password"
                         : $"Password (hint: {waitPassword.PasswordHint})";
-                    await Client.CheckAuthenticationPasswordAsync(PromptSecret(passwordPrompt));
+                    var password = PromptSecret(passwordPrompt);
+                    await RunLoginRequest(() => Client.CheckAuthenticationPasswordAsync(password), cancellationToken);
                     break;
 
                 case TdApi.AuthorizationState.AuthorizationStateWaitEmailAddress:
-                    await Client.SetAuthenticationEmailAddressAsync(Prompt("Email"));
+                    var email = Prompt("Email");
+                    await RunLoginRequest(() => Client.SetAuthenticationEmailAddressAsync(email), cancellationToken);
                     break;
 
                 case TdApi.AuthorizationState.AuthorizationStateWaitEmailCode:
-                    await Client.CheckAuthenticationEmailCodeAsync(
-                        new TdApi.EmailAddressAuthentication.EmailAddressAuthenticationCode { Code = Prompt("Email code") });
+                    var code = Prompt("Email code");
+                    await RunLoginRequest(() => Client.CheckAuthenticationEmailCodeAsync(
+                        new TdApi.EmailAddressAuthentication.EmailAddressAuthenticationCode { Code = code }), cancellationToken);
                     break;
 
                 case TdApi.AuthorizationState.AuthorizationStateWaitRegistration:
                     var firstName = Prompt("First name");
                     var lastName = Prompt("Last name", allowEmpty: true);
-                    await Client.RegisterUserAsync(firstName, lastName, disableNotification: true);
+                    await RunLoginRequest(() => Client.RegisterUserAsync(firstName, lastName, disableNotification: true),
+                        cancellationToken);
                     break;
 
                 case TdApi.AuthorizationState.AuthorizationStateWaitOtherDeviceConfirmation confirmation:
                     Console.WriteLine("Confirm login on another Telegram client:");
                     Console.WriteLine(confirmation.Link);
-                    await WaitForAuthorizationChangeAsync(state);
                     break;
 
                 case TdApi.AuthorizationState.AuthorizationStateWaitPremiumPurchase:
-                    throw new ValidationException("Telegram requires Premium purchase for this login; tgcli can't complete that flow.");
-
-                case TdApi.AuthorizationState.AuthorizationStateClosing:
-                case TdApi.AuthorizationState.AuthorizationStateClosed:
-                    throw new ValidationException("TDLib session is closing or closed.");
-
-                default:
-                    await WaitForAuthorizationChangeAsync(state);
-                    break;
+                    throw new TelegramAuthorizationException(TelegramAuthorizationFailure.LoginRequired,
+                        "Telegram requires Premium purchase for this login; tgcli can't complete that flow.");
             }
+
+            await state.Changed.WaitAsync(LoginInputTimeout, cancellationToken);
         }
     }
 
-    public async Task EnsureReadyAsync()
-    {
-        var deadline = DateTimeOffset.UtcNow.AddSeconds(20);
-
-        while (DateTimeOffset.UtcNow < deadline)
-        {
-            var state = await GetAuthorizationStateAsync();
-            if (state is TdApi.AuthorizationState.AuthorizationStateReady)
-            {
-                return;
-            }
-
-            if (state is TdApi.AuthorizationState.AuthorizationStateWaitPhoneNumber
-                or TdApi.AuthorizationState.AuthorizationStateWaitCode
-                or TdApi.AuthorizationState.AuthorizationStateWaitPassword
-                or TdApi.AuthorizationState.AuthorizationStateWaitEmailAddress
-                or TdApi.AuthorizationState.AuthorizationStateWaitEmailCode
-                or TdApi.AuthorizationState.AuthorizationStateWaitRegistration
-                or TdApi.AuthorizationState.AuthorizationStateWaitOtherDeviceConfirmation)
-            {
-                throw new ValidationException("Telegram session is not authorized. Run `tgcli login` first.");
-            }
-
-            var remaining = deadline - DateTimeOffset.UtcNow;
-            if (remaining <= TimeSpan.Zero)
-            {
-                break;
-            }
-
-            await WaitForAuthorizationChangeAsync(state, remaining);
-        }
-
-        throw new TimeoutException("Timed out while waiting for TDLib authorization state.");
-    }
-
-    private Task? _disposeTask;
+    private Task RunLoginRequest(Func<Task<TdApi.Ok>> request, CancellationToken cancellationToken) =>
+        OperationDeadline.RunAsync(ct => RunNativeAsync(request, ct), AuthorizationTimeout,
+            cancellationToken, "Telegram login request");
 
     public async ValueTask DisposeAsync()
     {
-        Client.UpdateReceived -= OnUpdateReceived;
-        _disposeTask ??= CloseAndReleaseAsync();
-        if (await Task.WhenAny(_disposeTask, Task.Delay(TimeSpan.FromSeconds(10))) == _disposeTask)
-            await _disposeTask;
-        else
+        var shutdown = DisposeWhenDrainedAsync();
+        try { await shutdown.WaitAsync(_shutdownTimeout); }
+        catch (TimeoutException)
         {
-            // The native client may still be using its database. Retain the file lock
-            // until native disposal actually completes, or until this process exits.
-            Console.Error.WriteLine("Warning: TDLib shutdown exceeded 10 seconds; retaining its session lock until native shutdown or process exit.");
-            _ = _disposeTask.ContinueWith(t => _ = t.Exception, CancellationToken.None,
-                TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+            Console.Error.WriteLine("TDLib shutdown is still in progress. Its session lock remains held until shutdown or process exit.");
+            OperationDeadline.Observe(shutdown);
+        }
+    }
+
+    internal Task DisposeWhenDrainedAsync()
+    {
+        lock (_stateGate)
+        {
+            if (_disposeTask is not null) return _disposeTask;
+            _disposeTask = Task.Run(CloseAndReleaseAsync);
+            _authorizationChanged.TrySetResult();
+            OperationDeadline.Observe(_authorizationLost.CancelAsync());
+            return _disposeTask;
         }
     }
 
     private async Task CloseAndReleaseAsync()
     {
-        await Task.Run(Client.Dispose);
-        _lease?.Dispose();
-    }
-
-    private async Task InitializeAsync()
-    {
-        await Client.SetLogVerbosityLevelAsync(0);
-        var state = await Client.GetAuthorizationStateAsync();
-        await HandleAuthorizationStateAsync(state);
-    }
-
-    private async Task<TdApi.AuthorizationState> GetAuthorizationStateAsync()
-    {
-        var state = await Client.GetAuthorizationStateAsync();
-        await HandleAuthorizationStateAsync(state);
-        return _authorizationState ?? state;
-    }
-
-    private async Task HandleAuthorizationStateAsync(TdApi.AuthorizationState state)
-    {
-        _authorizationState = state;
-
-        if (state is TdApi.AuthorizationState.AuthorizationStateWaitTdlibParameters)
+        await _nativeGate.WaitAsync();
+        try { _native.Dispose(); }
+        catch
         {
-            await Client.SetTdlibParametersAsync(
-                useTestDc: false,
-                databaseDirectory: _config.DatabaseDirectory,
-                filesDirectory: _config.FilesDirectory,
-                databaseEncryptionKey: [],
-                useFileDatabase: true,
-                useChatInfoDatabase: true,
-                useMessageDatabase: true,
-                useSecretChats: false,
-                apiId: _config.ApiId,
-                apiHash: _config.ApiHash,
-                systemLanguageCode: "en",
-                deviceModel: Environment.MachineName,
-                systemVersion: RuntimeInformation.OSDescription,
-                applicationVersion: "7.0.1");
+            // A failed native close does not prove that the database is no longer in use.
+            FailedNativeShutdowns.Add(this);
+            throw;
+        }
+        finally { _nativeGate.Release(); }
+
+        try { _native.UpdateReceived -= OnUpdateReceived; }
+        finally { _lease.Dispose(); }
+    }
+
+    private async Task InitializeAsync(CancellationToken token)
+    {
+        await RunNativeAsync(async () =>
+        {
+            await _native.SetLogVerbosityAsync();
+            return true;
+        }, token);
+        var state = await RefreshAuthorizationAsync(token);
+        if (state.State is TdApi.AuthorizationState.AuthorizationStateWaitTdlibParameters)
+        {
+            var parameters = new TdApi.SetTdlibParameters
+            {
+                UseTestDc = false,
+                DatabaseDirectory = _config.DatabaseDirectory,
+                FilesDirectory = _config.FilesDirectory,
+                DatabaseEncryptionKey = [],
+                UseFileDatabase = true,
+                UseChatInfoDatabase = true,
+                UseMessageDatabase = true,
+                UseSecretChats = false,
+                ApiId = _config.ApiId,
+                ApiHash = _config.ApiHash,
+                SystemLanguageCode = "en",
+                DeviceModel = Environment.MachineName,
+                SystemVersion = RuntimeInformation.OSDescription,
+                ApplicationVersion = typeof(TelegramSession).Assembly.GetName().Version?.ToString(3) ?? string.Empty
+            };
+            await RunNativeAsync(async () =>
+            {
+                await _native.SetParametersAsync(parameters);
+                return true;
+            }, token);
         }
     }
 
-    private async Task HandleAuthenticationCodeAsync(TdApi.AuthenticationCodeInfo codeInfo)
+    private Task<AuthorizationSnapshot> RefreshAuthorizationAsync(CancellationToken token) =>
+        RunNativeAsync(async () =>
+        {
+            AuthorizationSnapshot before;
+            lock (_stateGate) before = ReadAuthorization();
+            var response = await _native.GetAuthorizationStateAsync();
+            lock (_stateGate)
+            {
+                // An update received since the query began is newer than the response.
+                if (ReferenceEquals(before.Changed, _authorizationChanged.Task)) RecordAuthorization(response);
+                return ReadAuthorization();
+            }
+        }, token);
+
+    private async Task<T> RunNativeAsync<T>(Func<Task<T>> action, CancellationToken token)
+    {
+        await _nativeGate.WaitAsync(token);
+        try
+        {
+            token.ThrowIfCancellationRequested();
+            lock (_stateGate) ThrowIfSessionUnusable();
+            var result = await action();
+            token.ThrowIfCancellationRequested();
+            lock (_stateGate) ThrowIfSessionUnusable();
+            return result;
+        }
+        catch (TdException error) when (TelegramRpcPolicy.Classify(error).Kind == TelegramRpcFailureKind.Authorization)
+        {
+            lock (_stateGate) MarkTerminal(TelegramAuthorizationFailure.Revoked);
+            token.ThrowIfCancellationRequested();
+            throw TelegramAuthorizationException.FromNative(error);
+        }
+        finally { _nativeGate.Release(); }
+    }
+
+    private void OnUpdateReceived(object? sender, TdApi.Update update)
+    {
+        if (update is TdApi.Update.UpdateConnectionState connectionUpdate)
+            _connection.Update(connectionUpdate.State);
+        if (update is TdApi.Update.UpdateAuthorizationState authUpdate)
+            lock (_stateGate) RecordAuthorization(authUpdate.AuthorizationState);
+    }
+
+    private AuthorizationSnapshot ReadAuthorization() => new(_authorizationState, _authorizationChanged.Task);
+
+    private void RecordAuthorization(TdApi.AuthorizationState state)
+    {
+        if (ReferenceEquals(_authorizationState, state)) return;
+        _authorizationState = state;
+        if (state is TdApi.AuthorizationState.AuthorizationStateReady) _wasAuthorized = true;
+        if (state is TdApi.AuthorizationState.AuthorizationStateLoggingOut || (_wasAuthorized && NeedsLogin(state)))
+            MarkTerminal(TelegramAuthorizationFailure.Revoked);
+        else if (state is TdApi.AuthorizationState.AuthorizationStateClosing or TdApi.AuthorizationState.AuthorizationStateClosed)
+            MarkTerminal(TelegramAuthorizationFailure.Closed);
+
+        var changed = _authorizationChanged;
+        _authorizationChanged = NewAuthorizationSignal();
+        changed.TrySetResult();
+    }
+
+    private void MarkTerminal(TelegramAuthorizationFailure reason)
+    {
+        if (_terminalReason is not null) return;
+        _terminalReason = reason;
+        OperationDeadline.Observe(_authorizationLost.CancelAsync());
+    }
+
+    internal void CheckActive()
+    {
+        lock (_stateGate) ThrowIfSessionUnusable();
+    }
+
+    private void ThrowIfSessionUnusable()
+    {
+        if (_terminalReason is { } reason)
+            throw new TelegramAuthorizationException(reason, reason == TelegramAuthorizationFailure.Revoked
+                ? "Telegram authorization has expired or been revoked. Run `tgcli login` first."
+                : "TDLib closed this session. Open a new session before retrying.");
+        if (_disposeTask is not null) throw new ObjectDisposedException(nameof(TelegramSession));
+    }
+
+    private static TaskCompletionSource NewAuthorizationSignal() => new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private readonly record struct AuthorizationSnapshot(TdApi.AuthorizationState? State, Task Changed);
+
+    private async Task HandleAuthenticationCodeAsync(TdApi.AuthenticationCodeInfo codeInfo, CancellationToken cancellationToken)
     {
         Console.WriteLine($"Telegram sent the login code {DescribeCodeDelivery(codeInfo.Type, codeInfo.PhoneNumber)}.");
 
@@ -263,10 +429,11 @@ internal sealed class TelegramSession : IAsyncDisposable
 
         while (true)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             var code = Prompt(codeInfo.NextType is null ? "Code" : "Code (or 'resend')");
             if (!string.Equals(code, "resend", StringComparison.OrdinalIgnoreCase))
             {
-                await Client.CheckAuthenticationCodeAsync(code);
+                await RunLoginRequest(() => Client.CheckAuthenticationCodeAsync(code), cancellationToken);
                 return;
             }
 
@@ -280,11 +447,11 @@ internal sealed class TelegramSession : IAsyncDisposable
             if (remaining > TimeSpan.Zero)
             {
                 Console.WriteLine($"Waiting {Math.Ceiling(remaining.TotalSeconds):0} seconds before requesting another code...");
-                await Task.Delay(remaining);
+                await Task.Delay(remaining, cancellationToken);
             }
 
-            await Client.ResendAuthenticationCodeAsync(
-                new TdApi.ResendCodeReason.ResendCodeReasonUserRequest());
+            await RunLoginRequest(() => Client.ResendAuthenticationCodeAsync(
+                new TdApi.ResendCodeReason.ResendCodeReasonUserRequest()), cancellationToken);
             return;
         }
     }
@@ -318,55 +485,14 @@ internal sealed class TelegramSession : IAsyncDisposable
         };
     }
 
-    private async Task WaitForAuthorizationChangeAsync(
-        TdApi.AuthorizationState previousState,
-        TimeSpan? timeout = null)
-    {
-        var source = _authorizationChanged;
-        if (!ReferenceEquals(_authorizationState, previousState))
-        {
-            return;
-        }
-
-        var state = await source.Task.WaitAsync(timeout ?? TimeSpan.FromMinutes(5));
-        await HandleAuthorizationStateAsync(state);
-    }
-
-    private void OnUpdateReceived(object? sender, TdApi.Update update)
-    {
-        if (update is TdApi.Update.UpdateConnectionState connectionUpdate)
-        {
-            _connection.Update(connectionUpdate.State);
-            return;
-        }
-        if (update is not TdApi.Update.UpdateAuthorizationState authUpdate)
-        {
-            return;
-        }
-
-        _authorizationState = authUpdate.AuthorizationState;
-        var oldSource = _authorizationChanged;
-        _authorizationChanged = NewAuthorizationChangedSource();
-        oldSource.TrySetResult(authUpdate.AuthorizationState);
-    }
-
-    private static TaskCompletionSource<TdApi.AuthorizationState> NewAuthorizationChangedSource()
-    {
-        return new TaskCompletionSource<TdApi.AuthorizationState>(TaskCreationOptions.RunContinuationsAsynchronously);
-    }
-
-    private static void DisableTdLibLogging()
-    {
-        TdJsonClient.GlobalExecute("""{"@type":"setLogVerbosityLevel","new_verbosity_level":0}""");
-    }
-
     private static string Prompt(string label, bool allowEmpty = false)
     {
         while (true)
         {
             Console.Write($"{label}: ");
             var value = Console.ReadLine()
-                ?? throw new ValidationException("Telegram login requires input, but stdin ended. Run `tgcli login` with the required input.");
+                ?? throw new TelegramAuthorizationException(TelegramAuthorizationFailure.LoginRequired,
+                    "Telegram login requires input, but stdin ended. Run `tgcli login` with the required input.");
             if (allowEmpty || !string.IsNullOrWhiteSpace(value))
             {
                 return value.Trim();
@@ -381,7 +507,8 @@ internal sealed class TelegramSession : IAsyncDisposable
         {
             // Preserve the supplied password exactly and never print it.
             return Console.ReadLine()
-                ?? throw new ValidationException("Telegram login requires a password, but stdin ended.");
+                ?? throw new TelegramAuthorizationException(TelegramAuthorizationFailure.LoginRequired,
+                    "Telegram login requires a password, but stdin ended.");
         }
 
         var result = new List<char>();

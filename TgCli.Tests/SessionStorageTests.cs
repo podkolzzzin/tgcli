@@ -75,7 +75,7 @@ public sealed class SessionStorageTests : IDisposable
         Directory.CreateDirectory(Path.Combine(_root, "tdlib.lock.owner"));
 
         var failure = await Record.ExceptionAsync(() =>
-            TelegramSession.CreateAsync(_root, 1, "synthetic", saveConfig: false, noWait: true));
+            TelegramSession.CreateAsync(_root, 1, "synthetic", saveConfig: false, noWait: true, cancellationToken: TestContext.Current.CancellationToken));
         Assert.True(failure is IOException or UnauthorizedAccessException, failure?.ToString());
         using var nextLease = new FileStream(Path.Combine(_root, "tdlib.lock"), FileMode.Open, FileAccess.ReadWrite,
             FileShare.None);
@@ -241,7 +241,8 @@ public sealed class SessionPromptTests
             Console.SetIn(new EofThenThrow());
             Console.SetOut(new StringWriter());
             var error = Assert.Throws<TargetInvocationException>(() => prompt.Invoke(null, ["Last name", true]));
-            Assert.IsType<ValidationException>(error.InnerException);
+            Assert.Equal(TelegramAuthorizationFailure.LoginRequired,
+                Assert.IsType<TelegramAuthorizationException>(error.InnerException).Reason);
         }
         finally
         {

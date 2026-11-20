@@ -76,9 +76,68 @@ public sealed class McpSessionGateTests
         Assert.True(resource.Disposed);
     }
 
+    [Fact]
+    public async Task ShutdownDeadlineStillDisposesAfterOutstandingNativeWorkFinishes()
+    {
+        var resource = new Resource();
+        var entered = NewSignal();
+        var nativeComplete = NewSignal();
+        await using var gate = new McpSessionGate<Resource>(() => Task.FromResult(resource), TimeSpan.FromMilliseconds(50));
+        var active = gate.ExecuteAsync(async (_, _) =>
+        {
+            entered.SetResult();
+            await nativeComplete.Task;
+            return 1;
+        }, Timeout, Ct);
+        await entered.Task.WaitAsync(Ct);
+
+        try
+        {
+            await gate.DisposeAsync();
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => active);
+            Assert.False(resource.Disposed);
+        }
+        finally { nativeComplete.TrySetResult(); }
+
+        await resource.Disposal.Task.WaitAsync(TimeSpan.FromSeconds(5), Ct);
+    }
+
+    [Fact]
+    public async Task TerminalAuthorizationFailureRetiresSessionAndNextRequestRecreatesIt()
+    {
+        var first = new Resource();
+        var second = new Resource();
+        var creations = 0;
+        await using var gate = new McpSessionGate<Resource>(() => Task.FromResult(++creations == 1 ? first : second));
+        await Assert.ThrowsAsync<TelegramAuthorizationException>(() => gate.ExecuteAsync<int>((_, _) =>
+            throw new TelegramAuthorizationException(TelegramAuthorizationFailure.Revoked, "Synthetic revocation"), Timeout, Ct));
+        Assert.Same(second, await gate.ExecuteAsync((resource, _) => Task.FromResult(resource), Timeout, Ct));
+        Assert.True(first.Disposed);
+    }
+
+    [Fact]
+    public async Task CancellationDuringSynchronousCompletionCannotReturnSuccess()
+    {
+        var resource = new Resource();
+        await using var gate = new McpSessionGate<Resource>(() => Task.FromResult(resource));
+        using var cancel = CancellationTokenSource.CreateLinkedTokenSource(Ct);
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => gate.ExecuteAsync((_, _) =>
+        {
+            cancel.Cancel();
+            return Task.FromResult(123);
+        }, Timeout, cancel.Token));
+    }
+
     private sealed class Resource : IAsyncDisposable
     {
         internal bool Disposed;
-        public ValueTask DisposeAsync() { Assert.False(Disposed); Disposed = true; return ValueTask.CompletedTask; }
+        internal TaskCompletionSource Disposal { get; } = NewSignal();
+        public ValueTask DisposeAsync()
+        {
+            Assert.False(Disposed);
+            Disposed = true;
+            Disposal.SetResult();
+            return ValueTask.CompletedTask;
+        }
     }
 }
