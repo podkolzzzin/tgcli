@@ -128,8 +128,8 @@ class PackagedCliTests(unittest.TestCase):
         if self.rid == "win-x64":
             # A parent ACE absent from the private download directory must reach
             # the installed executable. Use a SID independent of Windows locale.
-            system = Path(os.environ["SystemRoot"]) / "System32"
-            subprocess.run([str(system / "icacls.exe"), str(destination.parent),
+            icacls = Path(os.environ["SystemRoot"]) / "System32" / "icacls.exe"
+            subprocess.run([str(icacls), str(destination.parent),
                             "/grant", "*S-1-5-11:(OI)(CI)(RX)"], check=True, timeout=30)
         destination.write_text("previous synthetic installation", encoding="ascii")
         handler = partial(QuietHandler, directory=snapshot)
@@ -144,14 +144,13 @@ class PackagedCliTests(unittest.TestCase):
         self.assertEqual(digest(destination), executable_hash)
         self.assertEqual(list(destination.parent.iterdir()), [destination])
         if self.rid == "win-x64":
-            powershell = system / "WindowsPowerShell" / "v1.0" / "powershell.exe"
-            acl = subprocess.run([str(powershell), "-NoProfile", "-NonInteractive", "-Command",
-                                  "(Get-Acl -LiteralPath $env:TGCLI_ACL_FILE).Access | ForEach-Object { "
-                                  "$_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value }"],
-                                 env=dict(os.environ, TGCLI_ACL_FILE=str(destination)), text=True,
-                                 capture_output=True, check=False, timeout=30)
-            self.assertEqual(acl.returncode, 0, (acl.stdout, acl.stderr))
-            self.assertIn("S-1-5-11", acl.stdout.splitlines(), acl.stderr)
+            acl_path = self.home / "installed-acl.txt"
+            result = subprocess.run([str(icacls), str(destination), "/save", str(acl_path)],
+                                    text=True, errors="backslashreplace", capture_output=True, check=False, timeout=30)
+            self.assertEqual(result.returncode, 0, (result.stdout, result.stderr))
+            # SDDL uses ID for inherited, A for allow, and AU for Authenticated Users.
+            inherited_sid = r"\(A;(?:[A-Z]{2})*ID(?:[A-Z]{2})*;[^;]+;;;(?:AU|S-1-5-11)\)"
+            self.assertRegex(acl_path.read_text(encoding="utf-16-le"), inherited_sid)
 
 
 def main():
