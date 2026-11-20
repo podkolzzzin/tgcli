@@ -1,5 +1,6 @@
 using System;
 using System.Threading;
+using System.IO;
 using System.Threading.Tasks;
 using TgCli;
 using Xunit;
@@ -12,6 +13,8 @@ public sealed class CliExecutionTests
         var testToken = TestContext.Current.CancellationToken;
         var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var drained = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var output = new StringWriter();
+        using var guardedOutput = new CliOutputWriter(output);
 
         var command = CliExecution.RunAsync(async token =>
         {
@@ -20,12 +23,14 @@ public sealed class CliExecutionTests
             await release.Task;
             Assert.True(CliExecution.CancellationToken.IsCancellationRequested);
             Assert.Equal(TimeSpan.Zero, CliExecution.Remaining);
+            Assert.Throws<OperationCanceledException>(() => guardedOutput.WriteLine("late success"));
             drained.SetResult();
         }, TimeSpan.FromMilliseconds(200), testToken);
 
         try { await Assert.ThrowsAsync<TimeoutException>(() => command); }
         finally { release.SetResult(); }
         await drained.Task.WaitAsync(TimeSpan.FromSeconds(5), testToken);
+        Assert.Empty(output.ToString());
         Assert.False(CliExecution.CancellationToken.CanBeCanceled);
         Assert.Equal(Timeout.InfiniteTimeSpan, CliExecution.Remaining);
     }

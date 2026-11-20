@@ -7,13 +7,11 @@ namespace TgCli;
 
 internal static class Program
 {
-    public static void Main(string[] args)
+    public static async Task<int> Main(string[] args)
     {
-        NativeTdLibBootstrap.Configure();
-
         var app = ConsoleApp.Create();
-        ConsoleApp.LogError = static message => Console.Error.WriteLine(message);
-        app.UseFilter<FriendlyErrorFilter>();
+        ConsoleApp.LogError = static message => Console.Error.WriteLine(CliFailure.BoundedMessage(message));
+        app.UseFilter<CliErrorFilter>();
 
         app.Add<TgCommands>();
         app.Add<ChatCommands>("chat");
@@ -25,42 +23,55 @@ internal static class Program
         app.Add<SessionCommands>("session");
         app.Add<McpCommands>("mcp");
 
-        app.Run(args);
+        using var canceled = new CancellationTokenSource();
+        using var interrupt = PosixSignalRegistration.Create(PosixSignal.SIGINT, Cancel);
+        using var terminate = PosixSignalRegistration.Create(PosixSignal.SIGTERM, Cancel);
+        using var quit = PosixSignalRegistration.Create(PosixSignal.SIGQUIT, Cancel);
+        try
+        {
+            var preflight = new CliPreflight(
+                (typeof(TgCommands), ""), (typeof(ChatCommands), "chat"), (typeof(ChannelCommands), "channel"),
+                (typeof(BotCommands), "bot"), (typeof(ForumCommands), "forum"), (typeof(LinkCommands), "link"),
+                (typeof(MessageCommands), "message"), (typeof(SessionCommands), "session"), (typeof(McpCommands), "mcp"));
+            var invocation = preflight.Prepare(args);
+            Console.SetOut(CliOutputWriter.Open());
+            NativeTdLibBootstrap.Configure();
+
+            var failure = await CliExecution.RunAsync(async token =>
+            {
+                await app.RunAsync(invocation.Arguments, token);
+                token.ThrowIfCancellationRequested();
+                if (invocation.ShowGlobalTimeoutHelp)
+                    Console.WriteLine("  --request-timeout <seconds>    Total command deadline, 1–3600 (default: 60). Excludes the MCP server.");
+            }, invocation.Budget, canceled.Token);
+            return failure is null ? Environment.ExitCode : ReportFailure(failure);
+        }
+        catch (Exception error)
+        {
+            return ReportFailure(error);
+        }
+
+        void Cancel(PosixSignalContext signal)
+        {
+            signal.Cancel = true;
+            _ = canceled.CancelAsync();
+        }
+    }
+
+    private static int ReportFailure(Exception error)
+    {
+        var failure = CliFailure.FromException(error);
+        if (failure.Message is { Length: > 0 }) Console.Error.WriteLine(failure.Message);
+        return failure.ExitCode;
     }
 }
 
-internal sealed class FriendlyErrorFilter(ConsoleAppFilter next) : ConsoleAppFilter(next)
+internal sealed class CliErrorFilter(ConsoleAppFilter next) : ConsoleAppFilter(next)
 {
     public override async Task InvokeAsync(ConsoleAppContext context, CancellationToken cancellationToken)
     {
-        try
-        {
-            await Next.InvokeAsync(context, cancellationToken);
-        }
-        catch (OperationCanceledException)
-        {
-            Environment.ExitCode = 130;
-            Console.Error.WriteLine("Operation canceled.");
-        }
-        catch (Exception ex)
-        {
-            Environment.ExitCode = 1;
-            Console.Error.WriteLine(FriendlyMessage(ex));
-        }
-    }
-
-    private static string FriendlyMessage(Exception ex)
-    {
-        var message = ex switch
-        {
-            TargetInvocationException { InnerException: not null } tie => FriendlyMessage(tie.InnerException!),
-            AggregateException { InnerExceptions.Count: 1 } aggregate => FriendlyMessage(aggregate.InnerExceptions[0]),
-            _ => ex.Message
-        };
-
-        return string.IsNullOrWhiteSpace(message)
-            ? ex.GetType().Name
-            : message;
+        try { await Next.InvokeAsync(context, cancellationToken); }
+        catch (Exception error) { CliExecution.RecordFailure(error); }
     }
 }
 
