@@ -3,46 +3,65 @@ using System.Text.Json;
 
 namespace TgCli;
 
+internal enum McpClientKind { File, Claude, Codex, Copilot }
 internal sealed record McpInstallTarget(string Client, string Path, McpConfigFormat Format, string RootKey,
-    bool Installed, string? Cli = null, string? Profile = null, string? Scope = null, string? DiscoveryError = null);
+    bool Installed, string? Cli = null, McpClientKind Kind = McpClientKind.File, string? Scope = null, string? DiscoveryError = null);
 internal sealed record McpInstallResult(string Client, string Status, string Path, string Message);
-internal sealed record McpProcessResult(int ExitCode, string Output, string Error);
 
 internal interface IMcpProcessRunner
 {
-    Task<McpProcessResult> RunAsync(string executable, IReadOnlyList<string> arguments, CancellationToken cancellationToken);
+    Task<int> RunAsync(string executable, IReadOnlyList<string> arguments, CancellationToken cancellationToken);
 }
 
 internal sealed class McpProcessRunner : IMcpProcessRunner
 {
-    public async Task<McpProcessResult> RunAsync(string executable, IReadOnlyList<string> arguments, CancellationToken cancellationToken)
+    public async Task<int> RunAsync(string executable, IReadOnlyList<string> arguments, CancellationToken cancellationToken)
     {
+        cancellationToken.ThrowIfCancellationRequested();
         var start = new ProcessStartInfo(executable) { UseShellExecute = false, RedirectStandardInput = true, RedirectStandardOutput = true, RedirectStandardError = true, CreateNoWindow = true };
         if (OperatingSystem.IsWindows() && Path.GetExtension(executable).Equals(".cmd", StringComparison.OrdinalIgnoreCase))
         {
-            // npm launchers use cmd.exe. Reject characters expanded even inside cmd quotes.
-            var parts = new[] { executable }.Concat(arguments).ToArray();
-            if (parts.Any(x => x.IndexOfAny(['"', '%', '!', '\r', '\n']) >= 0))
-                throw new InvalidOperationException("This Windows .cmd launcher cannot safely represent these arguments. Use the client's native .exe or remove shell expansion characters from paths.");
             start.FileName = Environment.GetEnvironmentVariable("COMSPEC") ?? "cmd.exe";
-            start.Arguments = "/d /s /c \"" + string.Join(' ', parts.Select(x => "\"" + x + "\"")) + "\"";
+            start.Arguments = BuildWindowsCmdArguments(executable, arguments);
         }
         else foreach (var argument in arguments) start.ArgumentList.Add(argument);
         using var process = Process.Start(start) ?? throw new IOException("Could not start MCP configuration command.");
         process.StandardInput.Close();
-        var output = process.StandardOutput.ReadToEndAsync(cancellationToken);
-        var error = process.StandardError.ReadToEndAsync(cancellationToken);
+        var output = process.StandardOutput.BaseStream.CopyToAsync(Stream.Null, cancellationToken);
+        var error = process.StandardError.BaseStream.CopyToAsync(Stream.Null, cancellationToken);
         try
         {
             await process.WaitForExitAsync(cancellationToken);
-            return new(process.ExitCode, await output, await error);
+            await Task.WhenAll(output, error);
+            return process.ExitCode;
         }
         catch
         {
-            if (!process.HasExited) process.Kill(entireProcessTree: true);
+            try
+            {
+                if (!process.HasExited) process.Kill(entireProcessTree: true);
+            }
+            catch (InvalidOperationException) when (process.HasExited) { }
             await process.WaitForExitAsync(CancellationToken.None);
-            try { await Task.WhenAll(output, error); } catch (OperationCanceledException) { }
+            try { await Task.WhenAll(output, error); }
+            catch (Exception ex) when (ex is IOException or OperationCanceledException) { }
             throw;
+        }
+    }
+
+    internal static string BuildWindowsCmdArguments(string executable, IReadOnlyList<string> arguments)
+    {
+        // npm launchers use cmd.exe and pass %* to their native executable.
+        var parts = new[] { executable }.Concat(arguments).ToArray();
+        if (parts.Any(x => x.IndexOfAny(['"', '%', '!', '\r', '\n', '\0']) >= 0))
+            throw new InvalidOperationException("This Windows .cmd launcher cannot safely represent these arguments. Use the client's native .exe or remove shell expansion characters from paths.");
+        return "/d /v:off /s /c \"" + string.Join(' ', parts.Select(Quote)) + "\"";
+
+        static string Quote(string argument)
+        {
+            // Preserve trailing backslashes when the shim forwards the quoted argument to an .exe.
+            var trailing = argument.Length - argument.TrimEnd('\\').Length;
+            return "\"" + argument + new string('\\', trailing) + "\"";
         }
     }
 }
@@ -68,8 +87,10 @@ internal sealed class McpInstaller(IMcpProcessRunner runner)
                     results.Add(previous with { Client = target.Client, Message = $"Shares configuration with {previous.Client}. {previous.Message}" });
                     continue;
                 }
-                var original = File.Exists(path) ? await File.ReadAllTextAsync(path, token) : null;
-                var expected = McpConfiguration.Merge(original, target.Format, target.RootKey, launch, target.Client.StartsWith("Copilot CLI", StringComparison.Ordinal));
+                var original = await McpConfiguration.ReadAsync(path, target.Format, token);
+                var expected = McpConfiguration.Merge(original, target.Format, target.RootKey, launch, target.Kind == McpClientKind.Copilot);
+                if (expected != original && !launch.Matches(McpConfiguration.ReadEntry(expected, target.Format, target.RootKey)))
+                    throw new InvalidDataException("The generated configuration did not contain the expected tgcli entry.");
                 if (expected == original)
                     result = new(target.Client, "already-installed", path, "The saved command and arguments already match. " + target.Scope);
                 else if (dryRun)
@@ -77,25 +98,8 @@ internal sealed class McpInstaller(IMcpProcessRunner runner)
                 else
                 {
                     if (target.Cli is not null)
-                    {
-                        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(token);
-                        timeout.CancelAfter(TimeSpan.FromSeconds(30));
-                        var args = BuildArguments(target, launch);
-                        try
-                        {
-                            // Validate the exact config before invoking a client, which owns its own write strategy.
-                            if (original is not null) await McpConfiguration.BackupAsync(path, original, token);
-                            var cliResult = await runner.RunAsync(target.Cli, args, timeout.Token);
-                            if (cliResult.ExitCode != 0)
-                                throw new IOException($"Client MCP registration exited with code {cliResult.ExitCode}. Check its MCP settings and supported CLI version.");
-                        }
-                        catch (OperationCanceledException) when (!token.IsCancellationRequested)
-                        {
-                            if (!await IsSavedAsync(path, target, launch, token)) throw new TimeoutException("Client configuration command timed out; the expected entry was not saved.");
-                        }
-                    }
-                    else await McpConfiguration.WriteAtomicAsync(path, original, expected, token);
-                    if (!await IsSavedAsync(path, target, launch, token)) throw new IOException("Client configuration verification failed: the expected tgcli entry was not persisted at this path.");
+                        await InstallWithClientAsync(path, original, target, launch, token);
+                    else await McpConfiguration.WriteAtomicAsync(path, original, expected, token, target.Format);
                     result = new(target.Client, "installed", path, "Saved and verified. Reload MCP settings in the client. " + target.Scope);
                 }
             }
@@ -125,20 +129,47 @@ internal sealed class McpInstaller(IMcpProcessRunner runner)
         }
         return resolved;
     }
-    private static async Task<bool> IsSavedAsync(string path, McpInstallTarget target, McpLaunch launch, CancellationToken ct) =>
-        File.Exists(path) && launch.Matches(McpConfiguration.ReadEntry(await File.ReadAllTextAsync(path, ct), target.Format, target.RootKey));
-
-    internal static string[] BuildArguments(McpInstallTarget target, McpLaunch launch)
+    private async Task InstallWithClientAsync(string path, string? original, McpInstallTarget target, McpLaunch launch, CancellationToken token)
     {
-        if (target.Client.StartsWith("VS Code", StringComparison.Ordinal))
+        var args = BuildArguments(target, launch);
+        token.ThrowIfCancellationRequested();
+        using var writeLock = McpConfiguration.AcquireWriteLock(path);
+        await McpConfiguration.EnsureUnchangedAsync(path, original, target.Format, token);
+        if (original is not null)
         {
-            var json = launch.ToJson(); json["name"] = "tgcli";
-            return target.Profile is null ? ["--add-mcp", json.ToJsonString()] : ["--profile", target.Profile, "--add-mcp", json.ToJsonString()];
+            await McpConfiguration.BackupAsync(path, original, target.Format, token);
+            await McpConfiguration.EnsureUnchangedAsync(path, original, target.Format, token);
         }
-        var args = target.Client == "Claude Code CLI"
-            ? new List<string> { "mcp", "add", "--transport", "stdio", "--scope", "user", "tgcli", "--", launch.Command }
-            : new List<string> { "mcp", "add", "tgcli", "--", launch.Command };
-        args.AddRange(launch.Arguments);
-        return args.ToArray();
+
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(token);
+        timeout.CancelAfter(TimeSpan.FromSeconds(30));
+        var timedOut = false;
+        try
+        {
+            var exitCode = await runner.RunAsync(target.Cli!, args, timeout.Token);
+            if (exitCode != 0)
+                throw new IOException($"Client MCP registration exited with code {exitCode}. Check its MCP settings and supported CLI version.");
+        }
+        catch (OperationCanceledException) when (!token.IsCancellationRequested) { timedOut = true; }
+
+        var saved = await McpConfiguration.ReadAsync(path, target.Format, token);
+        if (saved is null || !launch.Matches(McpConfiguration.ReadEntry(saved, target.Format, target.RootKey)))
+        {
+            if (timedOut) throw new TimeoutException("Client configuration command timed out; the expected entry was not saved.");
+            throw new IOException("Client configuration verification failed: the expected tgcli entry was not persisted at this path.");
+        }
+        if (original is not null && !McpConfiguration.PreservesSettings(original, saved, target.Format))
+            throw new IOException("Client configuration verification failed: unrelated saved settings changed. Review the private backup before retrying.");
+    }
+
+    private static string[] BuildArguments(McpInstallTarget target, McpLaunch launch)
+    {
+        var prefix = target.Kind switch
+        {
+            McpClientKind.Claude => new[] { "mcp", "add", "--transport", "stdio", "--scope", "user", "tgcli", "--" },
+            McpClientKind.Codex or McpClientKind.Copilot => ["mcp", "add", "tgcli", "--"],
+            _ => throw new InvalidOperationException("This adapter does not support native registration.")
+        };
+        return [..prefix, launch.Command, ..launch.Arguments];
     }
 }

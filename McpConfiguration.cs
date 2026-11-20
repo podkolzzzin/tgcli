@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -24,7 +25,7 @@ internal sealed record McpLaunch(string Command, string[] Arguments)
         args.AddRange(["mcp", "--session", Path.GetFullPath(session)]);
         return new(Path.GetFullPath(executable), args.ToArray());
     }
-    internal JsonObject ToJson(bool copilot = false) => new()
+    internal JsonObject ToJson() => new()
     {
         ["type"] = "stdio",
         ["command"] = Command,
@@ -40,6 +41,7 @@ internal sealed record McpLaunch(string Command, string[] Arguments)
 
 internal static class McpConfiguration
 {
+    private static readonly Encoding StrictUtf8 = new UTF8Encoding(false, true);
     internal static readonly JsonDocumentOptions JsonOptions = new() { CommentHandling = JsonCommentHandling.Skip, AllowTrailingCommas = true };
 
     internal static JsonObject ReadJson(string text)
@@ -141,77 +143,190 @@ internal static class McpConfiguration
         return result;
     }
 
-    internal static async Task WriteAtomicAsync(string path, string? original, string updated, CancellationToken ct)
+    internal static async Task<string?> ReadAsync(string path, McpConfigFormat format, CancellationToken ct)
     {
-        if (original == updated) return;
-        var directory = Path.GetDirectoryName(path)!;
-        Directory.CreateDirectory(directory);
-        var temp = Path.Combine(directory, ".tgcli-mcp-" + Guid.NewGuid().ToString("N") + ".tmp");
         try
         {
-            await WritePrivateAsync(temp, updated, ct);
-            var current = File.Exists(path) ? await File.ReadAllTextAsync(path, ct) : null;
-            if (current != original) throw new IOException("Configuration changed during installation. Retry after the client finishes saving settings.");
-            if (original is not null)
-            {
-                await BackupAsync(path, original, ct);
-            }
-            File.Move(temp, path, overwrite: original is not null);
+            var bytes = await File.ReadAllBytesAsync(path, ct);
+            return ConfigEncoding(format).GetString(bytes);
         }
-        finally { if (File.Exists(temp)) File.Delete(temp); }
+        catch (FileNotFoundException) { return null; }
+        catch (DirectoryNotFoundException) { return null; }
+        catch (DecoderFallbackException) { throw new InvalidDataException("Configuration is not valid UTF-8. Save it in the client before retrying."); }
     }
 
-    internal static Task BackupAsync(string path, string original, CancellationToken ct) =>
-        WritePrivateAsync(path + ".tgcli-backup-" + Guid.NewGuid().ToString("N"), original, ct);
+    private static Encoding ConfigEncoding(McpConfigFormat format) =>
+        format == McpConfigFormat.EclipsePreferences ? Encoding.Latin1 : StrictUtf8;
 
-    private static async Task WritePrivateAsync(string path, string text, CancellationToken ct)
+    internal static FileStream AcquireWriteLock(string path)
+    {
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        // Keep the coordination inode in place across installs, even after releasing it.
+        var options = new FileStreamOptions { Mode = FileMode.OpenOrCreate, Access = FileAccess.ReadWrite, Share = FileShare.None };
+        if (!OperatingSystem.IsWindows()) options.UnixCreateMode = UnixFileMode.UserRead | UnixFileMode.UserWrite;
+        try { return new FileStream(path + ".tgcli-lock", options); }
+        catch (IOException ex) { throw new IOException("Could not lock the configuration. Another tgcli installer may be writing it.", ex); }
+    }
+
+    internal static async Task EnsureUnchangedAsync(string path, string? original, McpConfigFormat format, CancellationToken ct)
+    {
+        if (await ReadAsync(path, format, ct) != original)
+            throw new IOException("Configuration changed during installation. Retry after the client finishes saving settings.");
+    }
+
+    internal static async Task WriteAtomicAsync(string path, string? original, string updated, CancellationToken ct,
+        McpConfigFormat format = McpConfigFormat.Json)
+    {
+        if (original == updated) return;
+        ct.ThrowIfCancellationRequested();
+        using var writeLock = AcquireWriteLock(path);
+        var temp = Path.Combine(Path.GetDirectoryName(path)!, ".tgcli-mcp-" + Guid.NewGuid().ToString("N") + ".tmp");
+        try
+        {
+            await WritePrivateAsync(temp, updated, format, ct);
+            await EnsureUnchangedAsync(path, original, format, ct);
+            if (original is not null)
+            {
+                await BackupAsync(path, original, format, ct);
+                await EnsureUnchangedAsync(path, original, format, ct);
+            }
+            ct.ThrowIfCancellationRequested();
+            File.Move(temp, path, overwrite: original is not null);
+            if (await ReadAsync(path, format, ct) != updated)
+                throw new IOException("Client configuration verification failed: the saved file changed after replacement.");
+        }
+        finally { File.Delete(temp); }
+    }
+
+    internal static async Task BackupAsync(string path, string original, McpConfigFormat format, CancellationToken ct)
+    {
+        var backup = path + ".tgcli-backup-" + Guid.NewGuid().ToString("N");
+        var temp = backup + ".tmp";
+        try
+        {
+            await WritePrivateAsync(temp, original, format, ct);
+            ct.ThrowIfCancellationRequested();
+            File.Move(temp, backup);
+        }
+        finally { File.Delete(temp); }
+    }
+
+    internal static bool PreservesSettings(string original, string saved, McpConfigFormat format)
+    {
+        if (format == McpConfigFormat.Json) return ContainsOriginal(ReadJson(original), ReadJson(saved));
+        var before = JsonSerializer.SerializeToNode(Toml.ToModel(original.TrimStart('\uFEFF')));
+        var after = JsonSerializer.SerializeToNode(Toml.ToModel(saved.TrimStart('\uFEFF')));
+        return ContainsOriginal(before, after);
+    }
+
+    // Native clients may reformat settings or add other keys. Report if the previous
+    // values were removed or changed, leaving any recovery to the user and their backup.
+    private static bool ContainsOriginal(JsonNode? original, JsonNode? saved)
+    {
+        if (original is JsonObject before && saved is JsonObject after)
+            return before.All(property => after.TryGetPropertyValue(property.Key, out var value) && ContainsOriginal(property.Value, value));
+        return JsonNode.DeepEquals(original, saved);
+    }
+
+    private static async Task WritePrivateAsync(string path, string text, McpConfigFormat format, CancellationToken ct)
     {
         var options = new FileStreamOptions { Mode = FileMode.CreateNew, Access = FileAccess.Write, Share = FileShare.None };
         if (!OperatingSystem.IsWindows()) options.UnixCreateMode = UnixFileMode.UserRead | UnixFileMode.UserWrite;
         await using var stream = new FileStream(path, options);
-        await stream.WriteAsync(Encoding.UTF8.GetBytes(text), ct);
+        await stream.WriteAsync(ConfigEncoding(format).GetBytes(text), ct);
         await stream.FlushAsync(ct);
     }
 }
 
 internal static class JavaProperties
 {
-    internal static string? Get(string text, string key)
-    {
-        var matches = Lines(text).Where(x => x.Key == key).ToArray();
-        if (matches.Length > 1) throw new InvalidDataException($"Duplicate Eclipse preference: {key}.");
-        return matches.Length == 0 ? null : Unescape(matches[0].Value);
-    }
+    private sealed record Property(string Value, int Start, int End, string Newline);
+
+    internal static string? Get(string text, string key) => Find(text, key)?.Value;
+
     internal static string Set(string text, string key, string value)
     {
-        var lines = Lines(text).Where(x => x.Key == key).ToArray();
-        if (lines.Length > 1) throw new InvalidDataException($"Duplicate Eclipse preference: {key}.");
-        var newLine = key + "=" + Escape(value) + "\n";
-        return lines.Length == 0 ? text.TrimEnd('\r', '\n') + "\n" + newLine
-            : text[..lines[0].Start] + newLine + text[lines[0].End..];
+        var property = Find(text, key);
+        var replacement = key + "=" + (value.StartsWith(' ') ? "\\" : "") + Escape(value);
+        if (property is not null)
+            return text[..property.Start] + replacement + property.Newline + text[property.End..];
+
+        var firstTerminator = text.AsSpan().IndexOfAny('\r', '\n');
+        var newline = firstTerminator < 0 ? "\n" : LineEnding(text, firstTerminator);
+        var separator = text.Length == 0 || text[^1] is '\r' or '\n' ? "" : newline;
+        return text + separator + replacement + newline;
     }
-    private static IEnumerable<(string Key, string Value, int Start, int End)> Lines(string text)
+
+    private static Property? Find(string text, string key)
     {
+        Property? match = null;
         var offset = 0;
-        foreach (var raw in text.Split('\n'))
+        while (offset < text.Length)
         {
-            var line = raw.TrimEnd('\r'); var start = offset; offset = Math.Min(text.Length, offset + raw.Length + 1);
-            if (line.TrimStart().StartsWith('#') || line.TrimStart().StartsWith('!')) continue;
-            var sep = -1; var escaped = false;
-            for (var i = 0; i < line.Length; i++)
+            var start = offset;
+            var line = ReadLine(text, ref offset, out var newline);
+            if (line.IsEmpty || line[0] is '#' or '!') continue;
+
+            var logical = new StringBuilder();
+            while (HasContinuation(line))
             {
-                if (!escaped && line[i] is '=' or ':') { sep = i; break; }
-                escaped = !escaped && line[i] == '\\';
+                // Appending a new property to an unfinished continuation could absorb it.
+                if (offset == text.Length)
+                    throw new InvalidDataException("Eclipse preferences end with an unfinished continuation.");
+                logical.Append(line[..^1]);
+                line = ReadLine(text, ref offset, out newline);
+                if (logical.Length == 0 && (line.IsEmpty || line[0] is '#' or '!')) break;
             }
-            if (sep < 0) continue;
-            var key = Unescape(line[..sep].Trim());
-            var value = line[(sep + 1)..].TrimStart();
-            if (value.EndsWith('\\') && value.Reverse().TakeWhile(c => c == '\\').Count() % 2 != 0)
-                throw new InvalidDataException("Continued Eclipse property lines are not supported; save preferences from Eclipse first.");
-            yield return (key, value, start, offset);
+            if (logical.Length == 0 && (line.IsEmpty || line[0] is '#' or '!')) continue;
+            logical.Append(line);
+            var (name, value) = SplitProperty(logical.ToString());
+            if (name != key) continue;
+            if (match is not null) throw new InvalidDataException($"Duplicate Eclipse preference: {key}.");
+            match = new(value, start, offset, newline);
         }
+        return match;
     }
-    internal static string Unescape(string value)
+
+    private static ReadOnlySpan<char> ReadLine(string text, ref int offset, out string newline)
+    {
+        var remaining = text.AsSpan(offset);
+        var length = remaining.IndexOfAny('\r', '\n');
+        if (length < 0) length = remaining.Length;
+        newline = LineEnding(text, offset + length);
+        offset += length + newline.Length;
+        return remaining[..length].TrimStart(" \t\f".AsSpan());
+    }
+
+    private static string LineEnding(string text, int index)
+    {
+        if (index == text.Length) return "";
+        if (text[index] == '\n') return "\n";
+        return index + 1 < text.Length && text[index + 1] == '\n' ? "\r\n" : "\r";
+    }
+
+    private static bool HasContinuation(ReadOnlySpan<char> line)
+    {
+        var backslashes = 0;
+        for (var i = line.Length - 1; i >= 0 && line[i] == '\\'; i--) backslashes++;
+        return backslashes % 2 != 0;
+    }
+
+    private static (string Key, string Value) SplitProperty(string line)
+    {
+        var keyEnd = 0;
+        while (keyEnd < line.Length)
+        {
+            var c = line[keyEnd];
+            if (c is ' ' or '\t' or '\f' or '=' or ':') break;
+            keyEnd += c == '\\' && keyEnd + 1 < line.Length ? 2 : 1;
+        }
+        var value = line.AsSpan(keyEnd).TrimStart(" \t\f".AsSpan());
+        if (!value.IsEmpty && value[0] is '=' or ':')
+            value = value[1..].TrimStart(" \t\f".AsSpan());
+        return (Unescape(line.AsSpan(0, keyEnd)), Unescape(value));
+    }
+
+    private static string Unescape(ReadOnlySpan<char> value)
     {
         var result = new StringBuilder();
         for (var i = 0; i < value.Length; i++)
@@ -222,13 +337,17 @@ internal static class JavaProperties
             c = value[i];
             if (c == 'u')
             {
-                if (i + 4 >= value.Length || !ushort.TryParse(value.AsSpan(i + 1, 4), System.Globalization.NumberStyles.HexNumber, null, out var code)) throw new InvalidDataException("Invalid Unicode escape.");
+                if (i + 4 >= value.Length ||
+                    value.Slice(i + 1, 4).IndexOfAnyExcept("0123456789abcdefABCDEF") >= 0 ||
+                    !ushort.TryParse(value.Slice(i + 1, 4), NumberStyles.AllowHexSpecifier, CultureInfo.InvariantCulture, out var code))
+                    throw new InvalidDataException("Invalid Unicode escape in Eclipse preferences.");
                 result.Append((char)code); i += 4;
             }
             else result.Append(c switch { 'n' => '\n', 'r' => '\r', 't' => '\t', 'f' => '\f', _ => c });
         }
         return result.ToString();
     }
+
     private static string Escape(string value) => string.Concat(value.Select(c => c switch
     {
         '\\' => "\\\\",
@@ -237,7 +356,7 @@ internal static class JavaProperties
         '\t' => "\\t",
         '=' => "\\=",
         ':' => "\\:",
-        > '\u007e' or < ' ' => "\\u" + ((int)c).ToString("x4"),
+        > '\u007e' or < ' ' => "\\u" + ((int)c).ToString("x4", CultureInfo.InvariantCulture),
         _ => c.ToString()
     }));
 }

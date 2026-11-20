@@ -104,7 +104,7 @@ public sealed class McpInstallerTests
     public async Task DryRunDoesNotCreateProfilesOrLaunchClient()
     {
         using var temp = new TestDirectory();
-        var target = new McpInstallTarget("Claude Code CLI", Path.Combine(temp.Path, "new", "settings.json"), McpConfigFormat.Json, "mcpServers", true, "/fake/claude");
+        var target = new McpInstallTarget("Claude Code CLI", Path.Combine(temp.Path, "new", "settings.json"), McpConfigFormat.Json, "mcpServers", true, "/fake/claude", McpClientKind.Claude);
         var results = await new McpInstaller(new RejectRunner()).InstallAsync([target], Launch, true, TestContext.Current.CancellationToken);
         Assert.Equal("would-install", results.Single().Status);
         Assert.False(Directory.Exists(Path.GetDirectoryName(target.Path)));
@@ -114,8 +114,8 @@ public sealed class McpInstallerTests
     public async Task ClientSuccessWithoutPersistedEntryIsFailure()
     {
         using var temp = new TestDirectory();
-        var target = new McpInstallTarget("Codex CLI + Desktop", Path.Combine(temp.Path, "config.toml"), McpConfigFormat.Toml, "mcp_servers", true, "/fake/codex");
-        var runner = new DelegateRunner((exe, args, token) => Task.FromResult(new McpProcessResult(0, "success", "")));
+        var target = new McpInstallTarget("Codex CLI + Desktop", Path.Combine(temp.Path, "config.toml"), McpConfigFormat.Toml, "mcp_servers", true, "/fake/codex", McpClientKind.Codex);
+        var runner = new DelegateRunner((exe, args, token) => Task.FromResult(0));
         var results = await new McpInstaller(runner).InstallAsync([target], Launch, false, TestContext.Current.CancellationToken);
         Assert.Equal("failed", results.Single().Status);
         Assert.Contains("verification", results.Single().Message);
@@ -125,14 +125,14 @@ public sealed class McpInstallerTests
     public async Task NativeCommandReceivesSeparateArgumentsAndIsNotRepeated()
     {
         using var temp = new TestDirectory();
-        var target = new McpInstallTarget("Claude Code CLI", Path.Combine(temp.Path, "claude.json"), McpConfigFormat.Json, "mcpServers", true, "/fake/claude");
+        var target = new McpInstallTarget("Claude Code CLI", Path.Combine(temp.Path, "claude.json"), McpConfigFormat.Json, "mcpServers", true, "/fake/claude", McpClientKind.Claude);
         var calls = 0;
         var runner = new DelegateRunner(async (exe, args, token) =>
         {
             calls++;
             Assert.Equal(new[] { "mcp", "add", "--transport", "stdio", "--scope", "user", "tgcli", "--", Launch.Command }.Concat(Launch.Arguments), args);
             await File.WriteAllTextAsync(target.Path, McpConfiguration.Merge(null, target.Format, target.RootKey, Launch), token);
-            return new(0, "", "");
+            return 0;
         });
         var installer = new McpInstaller(runner);
         Assert.Equal("installed", (await installer.InstallAsync([target], Launch, false, TestContext.Current.CancellationToken)).Single().Status);
@@ -224,9 +224,9 @@ public sealed class McpInstallerTests
     }
 
     private sealed class RejectRunner : IMcpProcessRunner
-    { public Task<McpProcessResult> RunAsync(string exe, IReadOnlyList<string> args, CancellationToken ct) => throw new InvalidOperationException("Runner must not be called."); }
-    private sealed class DelegateRunner(Func<string, IReadOnlyList<string>, CancellationToken, Task<McpProcessResult>> run) : IMcpProcessRunner
-    { public Task<McpProcessResult> RunAsync(string exe, IReadOnlyList<string> args, CancellationToken ct) => run(exe, args, ct); }
+    { public Task<int> RunAsync(string exe, IReadOnlyList<string> args, CancellationToken ct) => throw new InvalidOperationException("Runner must not be called."); }
+    private sealed class DelegateRunner(Func<string, IReadOnlyList<string>, CancellationToken, Task<int>> run) : IMcpProcessRunner
+    { public Task<int> RunAsync(string exe, IReadOnlyList<string> args, CancellationToken ct) => run(exe, args, ct); }
     internal sealed class TestDirectory : IDisposable
     {
         internal string Path { get; } = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "tgcli-mcp-tests-" + Guid.NewGuid().ToString("N"));

@@ -1,3 +1,5 @@
+using System.Runtime.InteropServices;
+using System.Text.Json;
 using System.Text.Json.Nodes;
 
 namespace TgCli;
@@ -31,10 +33,16 @@ internal sealed class McpInstallEnvironment(string home, string os, IReadOnlyDic
             foreach (var suffix in Windows ? new[] { ".exe", ".cmd", "" } : new[] { "" })
             {
                 var path = Path.Combine(dir, name + suffix);
-                if (File.Exists(path)) return Path.GetFullPath(path);
+                if (File.Exists(path) && (Windows || !OperatingSystem.IsWindows() && IsExecutableOnUnix(path)))
+                    return Path.GetFullPath(path);
             }
         return null;
     }
+
+    private static bool IsExecutableOnUnix(string path) => Access(path, execute: 1) == 0; // X_OK
+
+    [DllImport("libc", EntryPoint = "access")]
+    private static extern int Access([MarshalAs(UnmanagedType.LPUTF8Str)] string path, int execute);
 }
 
 internal static class McpClientDiscovery
@@ -49,7 +57,7 @@ internal static class McpClientDiscovery
             var cli = env.Executable("claude");
             var claudeHome = env.Env("CLAUDE_CONFIG_DIR", Path.Combine(home, ".claude"));
             var config = env.Env("CLAUDE_CONFIG_DIR", "") is "" ? Path.Combine(home, ".claude.json") : Path.Combine(claudeHome, ".claude.json");
-            targets.Add(new("Claude Code CLI", config, McpConfigFormat.Json, "mcpServers", cli is not null || File.Exists(config), cli));
+            targets.Add(new("Claude Code CLI", config, McpConfigFormat.Json, "mcpServers", cli is not null || File.Exists(config), cli, McpClientKind.Claude));
             var desktopDir = env.Mac ? Path.Combine(home, "Library", "Application Support", "Claude") : env.Windows ? Path.Combine(env.AppData, "Claude") : Path.Combine(env.Xdg, "Claude");
             var desktopConfig = Path.Combine(desktopDir, "claude_desktop_config.json");
             var desktop = Directory.Exists(desktopDir) || env.Mac && (Directory.Exists("/Applications/Claude.app") || Directory.Exists(Path.Combine(home, "Applications", "Claude.app")));
@@ -61,14 +69,14 @@ internal static class McpClientDiscovery
             var cli = env.Executable("codex");
             var configHome = env.Env("CODEX_HOME", Path.Combine(home, ".codex"));
             targets.Add(new("Codex CLI + Desktop", Path.Combine(configHome, "config.toml"), McpConfigFormat.Toml, "mcp_servers",
-                cli is not null || Directory.Exists(configHome) || env.Mac && Directory.Exists("/Applications/Codex.app"), cli,
+                cli is not null || Directory.Exists(configHome) || env.Mac && Directory.Exists("/Applications/Codex.app"), cli, McpClientKind.Codex,
                 Scope: "Shared user configuration for CLI and Desktop on this Codex host."));
         }
         else if (family == "copilot")
         {
             var cli = env.Executable("copilot");
             var copilotHome = env.Env("COPILOT_HOME", Path.Combine(home, ".copilot"));
-            targets.Add(new("Copilot CLI / shared agent runtime", Path.Combine(copilotHome, "mcp-config.json"), McpConfigFormat.Json, "mcpServers", cli is not null || Directory.Exists(copilotHome), cli));
+            targets.Add(new("Copilot CLI / shared agent runtime", Path.Combine(copilotHome, "mcp-config.json"), McpConfigFormat.Json, "mcpServers", cli is not null || Directory.Exists(copilotHome), cli, McpClientKind.Copilot));
             Discover(() => AddVsCode(targets, env, "Code", "code", ".vscode"), "VS Code Stable", env.Xdg);
             Discover(() => AddVsCode(targets, env, "Code - Insiders", "code-insiders", ".vscode-insiders"), "VS Code Insiders", env.Xdg);
             var intellij = Path.Combine(env.Windows ? env.LocalAppData : env.Xdg, "github-copilot", "intellij");
@@ -86,13 +94,19 @@ internal static class McpClientDiscovery
         void Discover(Action action, string client, string path)
         {
             try { action(); }
-            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.Text.Json.JsonException or InvalidOperationException)
+            catch (Exception ex) when (IsDiscoveryFailure(ex))
             {
-                targets.Add(new(client, path, McpConfigFormat.Json, "servers", true,
-                    DiscoveryError: "Client profile discovery failed. Check access to its configuration and extension registries; other clients can still be configured."));
+                targets.Add(DiscoveryFailure(client, path));
             }
         }
     }
+
+    private static bool IsDiscoveryFailure(Exception ex) =>
+        ex is IOException or UnauthorizedAccessException or JsonException or InvalidOperationException or InvalidDataException;
+
+    private static McpInstallTarget DiscoveryFailure(string client, string path) =>
+        new(client, path, McpConfigFormat.Json, "servers", true,
+            DiscoveryError: "Client profile discovery failed. Check access to its configuration and registries; other clients can still be configured.");
 
     private static void AddVsCode(List<McpInstallTarget> targets, McpInstallEnvironment env, string product, string executable, string extensionHome)
     {
@@ -124,7 +138,7 @@ internal static class McpClientDiscovery
                     var list = JsonNode.Parse(text)?.AsArray();
                     installed = list?.Any(x => x?["identifier"]?["id"]?.GetValue<string>().StartsWith("github.copilot", StringComparison.OrdinalIgnoreCase) == true) == true;
                 }
-                catch (Exception ex) when (ex is System.Text.Json.JsonException or InvalidOperationException or IOException or UnauthorizedAccessException)
+                catch (Exception ex) when (IsDiscoveryFailure(ex))
                 {
                     installed = true;
                     discoveryError = "Cannot read this profile's extension registry. Repair extensions.json in VS Code and retry.";
@@ -142,12 +156,29 @@ internal static class McpClientDiscovery
         if (Directory.Exists(Path.Combine(standard, ".metadata"))) workspaces.Add(standard);
         // Read the IDE's own recent-workspace registry, never recursively scan project directories.
         foreach (var root in new[] { Path.Combine(env.Home, ".eclipse"), Path.Combine(env.Home, "eclipse", "configuration") })
-            foreach (var path in FindFiles(root, "org.eclipse.ui.ide.prefs", 5))
+        {
+            try
             {
-                var recent = JavaProperties.Get(File.ReadAllText(path), "RECENT_WORKSPACES");
-                if (recent is not null) foreach (var workspace in recent.Split('\n', StringSplitOptions.RemoveEmptyEntries))
-                        if (Path.IsPathFullyQualified(workspace) && Directory.Exists(Path.Combine(workspace, ".metadata"))) workspaces.Add(workspace);
+                foreach (var path in FindFiles(root, "org.eclipse.ui.ide.prefs", 5))
+                {
+                    try
+                    {
+                        var recent = JavaProperties.Get(System.Text.Encoding.Latin1.GetString(File.ReadAllBytes(path)), "RECENT_WORKSPACES");
+                        if (recent is null) continue;
+                        foreach (var workspace in recent.Split('\n', StringSplitOptions.RemoveEmptyEntries))
+                            if (Path.IsPathFullyQualified(workspace) && Directory.Exists(Path.Combine(workspace, ".metadata"))) workspaces.Add(workspace);
+                    }
+                    catch (Exception ex) when (IsDiscoveryFailure(ex))
+                    {
+                        targets.Add(DiscoveryFailure("Eclipse Copilot workspace registry", path));
+                    }
+                }
             }
+            catch (Exception ex) when (IsDiscoveryFailure(ex))
+            {
+                targets.Add(DiscoveryFailure("Eclipse Copilot workspace registry", root));
+            }
+        }
         if (workspaces.Count == 0)
             targets.Add(new("Eclipse Copilot", Path.Combine(env.Home, "eclipse-workspace", ".metadata", ".plugins", "org.eclipse.core.runtime", ".settings", "com.microsoft.copilot.eclipse.ui.prefs"), McpConfigFormat.EclipsePreferences, "servers", false,
                 Scope: "Use --eclipse-workspace for a workspace absent from Eclipse's recent-workspace registry."));
