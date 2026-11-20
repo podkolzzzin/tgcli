@@ -101,9 +101,11 @@ internal static class McpConfiguration
         }
         if (format == McpConfigFormat.Toml)
         {
-            // Appending a new table leaves every existing byte (including comments) intact.
-            var result = (original ?? "") + "\n[mcp_servers.tgcli]\ncommand = " + JsonSerializer.Serialize(launch.Command)
-                + "\nargs = " + JsonSerializer.Serialize(launch.Arguments) + "\n";
+            // Serialize only the new table body. The existing document stays byte-for-byte intact.
+            var args = new TomlArray();
+            foreach (var argument in launch.Arguments) args.Add(argument);
+            var entry = Toml.FromModel(new TomlTable { ["command"] = launch.Command, ["args"] = args });
+            var result = (original ?? "") + "\n[mcp_servers.tgcli]\n" + entry;
             _ = Toml.ToModel(result.TrimStart('\uFEFF'));
             return result;
         }

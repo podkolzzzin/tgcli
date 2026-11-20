@@ -1,7 +1,8 @@
-using ModelContextProtocol;
 using System.Globalization;
+using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Threading.Channels;
+using ModelContextProtocol;
 using ModelContextProtocol.Protocol;
 
 namespace TgCli;
@@ -17,12 +18,12 @@ internal sealed class McpCompatibilityTransport : ITransport
     private readonly CancellationTokenSource _stop = new();
     private readonly Task _pump;
     private enum ProtocolMode { Unnegotiated, Modern, Legacy }
-    private sealed record PendingInitialize(RequestId Id)
+    private sealed record PendingNegotiation(RequestId Id, ProtocolMode Mode)
     {
         internal TaskCompletionSource<bool> Completion { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
     }
     private ProtocolMode _mode;
-    private PendingInitialize? _pendingInitialize;
+    private PendingNegotiation? _pendingNegotiation;
     private int _disposed;
 
     internal McpCompatibilityTransport(ITransport inner) { _inner = inner; _pump = PumpAsync(); }
@@ -37,12 +38,28 @@ internal sealed class McpCompatibilityTransport : ITransport
             {
                 if (message is JsonRpcRequest request)
                 {
+                    if (!HasReadableProperties(request.Params))
+                    {
+                        await RejectAsync(request, -32602, "Request parameters contain invalid or duplicate JSON properties.");
+                        continue;
+                    }
                     if (request.Method == "initialize")
                     {
                         await InitializeAsync(request);
                         continue;
                     }
                     if (!await AcceptRequestAsync(request)) continue;
+                    if (_mode == ProtocolMode.Unnegotiated)
+                    {
+                        if (request.Method == "server/discover")
+                        {
+                            await NegotiateAsync(request, ProtocolMode.Modern);
+                            continue;
+                        }
+                        // Direct modern requests carry all negotiation metadata. Tool
+                        // execution can outlive the connection mode and run concurrently.
+                        _mode = ProtocolMode.Modern;
+                    }
                 }
                 await _incoming.Writer.WriteAsync(message, _stop.Token);
             }
@@ -74,17 +91,20 @@ internal sealed class McpCompatibilityTransport : ITransport
             return;
         }
 
-        // Route only one initialize at a time, and make pipelined requests wait
-        // until its response has determined whether the handshake succeeded.
-        var pending = new PendingInitialize(request.Id);
-        Volatile.Write(ref _pendingInitialize, pending);
+        await NegotiateAsync(request, ProtocolMode.Legacy);
+    }
+
+    private async Task NegotiateAsync(JsonRpcRequest request, ProtocolMode mode)
+    {
+        // Let pipelined requests see the outcome of a negotiation RPC before routing them.
+        var pending = new PendingNegotiation(request.Id, mode);
+        Volatile.Write(ref _pendingNegotiation, pending);
         try
         {
             await _incoming.Writer.WriteAsync(request, _stop.Token);
-            if (await pending.Completion.Task.WaitAsync(_stop.Token))
-                _mode = ProtocolMode.Legacy;
+            if (await pending.Completion.Task.WaitAsync(_stop.Token)) _mode = mode;
         }
-        finally { Volatile.Write(ref _pendingInitialize, null); }
+        finally { Volatile.Write(ref _pendingNegotiation, null); }
     }
 
     private async Task<bool> AcceptRequestAsync(JsonRpcRequest request)
@@ -109,18 +129,72 @@ internal sealed class McpCompatibilityTransport : ITransport
             await RejectAsync(request, -32602, "This connection uses the legacy initialize handshake.");
             return false;
         }
-        if (version is null || meta?["io.modelcontextprotocol/clientCapabilities"] is not JsonObject)
+        if (version is null || meta?["io.modelcontextprotocol/clientCapabilities"] is not JsonObject capabilities)
         {
             await RejectAsync(request, -32602, "Modern requests require protocolVersion and clientCapabilities in _meta. Legacy clients must initialize first.");
             return false;
         }
+        if (!HasValidModernMetadata(meta, capabilities))
+        {
+            await RejectAsync(request, -32602, "Invalid modern clientCapabilities, clientInfo or logLevel in _meta.");
+            return false;
+        }
 
-        _mode = ProtocolMode.Modern;
         return true;
     }
 
-    private static string? ReadString(JsonNode? node) =>
-        node is JsonValue value && value.TryGetValue<string>(out var result) ? result : null;
+    private static bool HasValidModernMetadata(JsonObject meta, JsonObject capabilities)
+    {
+        // Validate with the same types and converters the SDK uses to project request metadata.
+        var options = McpJsonUtilities.DefaultOptions;
+        try
+        {
+            if (capabilities.Deserialize(McpJsonUtilities.GetTypeInfo<ClientCapabilities>(options)) is null)
+                return false;
+            if (meta.TryGetPropertyValue("io.modelcontextprotocol/clientInfo", out var clientInfo) &&
+                (clientInfo is not JsonObject || clientInfo.Deserialize(McpJsonUtilities.GetTypeInfo<Implementation>(options))
+                    is not { Name: not null, Version: not null }))
+                return false;
+            if (meta.TryGetPropertyValue("io.modelcontextprotocol/logLevel", out var logLevel))
+            {
+                if (ReadString(logLevel) is null) return false;
+#pragma warning disable MCP9005 // Recognize the SDK's optional deprecated wire field.
+                _ = logLevel.Deserialize(McpJsonUtilities.GetTypeInfo<LoggingLevel>(options));
+#pragma warning restore MCP9005
+            }
+            return true;
+        }
+        catch (Exception ex) when (ex is JsonException or InvalidOperationException) { return false; }
+    }
+
+    private static bool HasReadableProperties(JsonNode? parameters)
+    {
+        // JsonNode defers materializing object properties until accessed. Duplicate
+        // names can throw here even when the SDK accepted the JSON-RPC frame.
+        try
+        {
+            ReadProperties(parameters);
+            return true;
+        }
+        catch (Exception ex) when (ex is ArgumentException or InvalidOperationException or JsonException)
+        {
+            return false;
+        }
+
+        static void ReadProperties(JsonNode? value)
+        {
+            if (value is JsonObject obj)
+                foreach (var property in obj) ReadProperties(property.Value);
+            else if (value is JsonArray array)
+                foreach (var item in array) ReadProperties(item);
+        }
+    }
+
+    private static string? ReadString(JsonNode? node)
+    {
+        try { return node is JsonValue value && value.TryGetValue<string>(out var result) ? result : null; }
+        catch (InvalidOperationException) { return null; } // Undecodable JSON strings are invalid parameters.
+    }
 
     private static bool IsVersion(string version) =>
         version.Length == 10 && DateOnly.TryParseExact(version, "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.None, out _);
@@ -131,14 +205,14 @@ internal sealed class McpCompatibilityTransport : ITransport
 
     public async Task SendMessageAsync(JsonRpcMessage message, CancellationToken cancellationToken = default)
     {
-        var pending = Volatile.Read(ref _pendingInitialize);
-        var completesInitialize = pending is not null && (message switch
+        var pending = Volatile.Read(ref _pendingNegotiation);
+        var completesNegotiation = pending is not null && (message switch
         {
             JsonRpcResponse response => response.Id == pending.Id,
             JsonRpcError error => error.Id == pending.Id,
             _ => false
         });
-        var initialized = false;
+        var negotiated = false;
         try
         {
             if (message is JsonRpcResponse { Result: JsonObject result } &&
@@ -151,12 +225,14 @@ internal sealed class McpCompatibilityTransport : ITransport
                 error.Error = new JsonRpcErrorDetail { Code = error.Error.Code, Message = "Method not found." };
 
             await _inner.SendMessageAsync(message, cancellationToken);
-            initialized = message is JsonRpcResponse { Result: JsonObject responseResult } &&
-                ReadString(responseResult["protocolVersion"]) is { } version && version != ModernVersion;
+            if (completesNegotiation && message is JsonRpcResponse { Result: JsonObject responseResult })
+                negotiated = pending!.Mode == ProtocolMode.Modern
+                    ? responseResult["supportedVersions"] is JsonArray versions && versions.Any(v => ReadString(v) == ModernVersion)
+                    : ReadString(responseResult["protocolVersion"]) is { } version && version != ModernVersion;
         }
         finally
         {
-            if (completesInitialize) pending!.Completion.TrySetResult(initialized);
+            if (completesNegotiation) pending!.Completion.TrySetResult(negotiated);
         }
     }
 

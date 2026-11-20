@@ -157,26 +157,19 @@ internal static class McpClientDiscovery
         // Read the IDE's own recent-workspace registry, never recursively scan project directories.
         foreach (var root in new[] { Path.Combine(env.Home, ".eclipse"), Path.Combine(env.Home, "eclipse", "configuration") })
         {
-            try
+            foreach (var path in FindEclipseRegistries(root, 5, OnDiscoveryFailure))
             {
-                foreach (var path in FindFiles(root, "org.eclipse.ui.ide.prefs", 5))
+                try
                 {
-                    try
-                    {
-                        var recent = JavaProperties.Get(System.Text.Encoding.Latin1.GetString(File.ReadAllBytes(path)), "RECENT_WORKSPACES");
-                        if (recent is null) continue;
-                        foreach (var workspace in recent.Split('\n', StringSplitOptions.RemoveEmptyEntries))
-                            if (Path.IsPathFullyQualified(workspace) && Directory.Exists(Path.Combine(workspace, ".metadata"))) workspaces.Add(workspace);
-                    }
-                    catch (Exception ex) when (IsDiscoveryFailure(ex))
-                    {
-                        targets.Add(DiscoveryFailure("Eclipse Copilot workspace registry", path));
-                    }
+                    var recent = JavaProperties.Get(System.Text.Encoding.Latin1.GetString(File.ReadAllBytes(path)), "RECENT_WORKSPACES");
+                    if (recent is null) continue;
+                    foreach (var workspace in recent.Split('\n', StringSplitOptions.RemoveEmptyEntries))
+                        if (Path.IsPathFullyQualified(workspace) && Directory.Exists(Path.Combine(workspace, ".metadata"))) workspaces.Add(workspace);
                 }
-            }
-            catch (Exception ex) when (IsDiscoveryFailure(ex))
-            {
-                targets.Add(DiscoveryFailure("Eclipse Copilot workspace registry", root));
+                catch (Exception ex) when (IsDiscoveryFailure(ex))
+                {
+                    OnDiscoveryFailure(path);
+                }
             }
         }
         if (workspaces.Count == 0)
@@ -190,15 +183,29 @@ internal static class McpClientDiscovery
             targets.Add(new("Eclipse Copilot / " + workspace, path, McpConfigFormat.EclipsePreferences, "servers", installed,
                 Scope: "Workspace scope (Eclipse stores these preferences per workspace). Reload Eclipse preferences after installation."));
         }
+        void OnDiscoveryFailure(string path) => targets.Add(DiscoveryFailure("Eclipse Copilot workspace registry", path));
     }
-    private static IEnumerable<string> FindFiles(string root, string name, int depth)
+
+    private static IEnumerable<string> FindEclipseRegistries(string path, int depth, Action<string> onFailure)
     {
-        if (depth < 0 || !Directory.Exists(root)) yield break;
-        foreach (var file in Directory.EnumerateFiles(root, name)) yield return file;
-        foreach (var dir in Directory.EnumerateDirectories(root))
+        FileSystemInfo[] entries;
+        try { entries = new DirectoryInfo(path).GetFileSystemInfos(); }
+        catch (DirectoryNotFoundException) { yield break; }
+        catch (Exception ex) when (IsDiscoveryFailure(ex))
         {
-            if (new DirectoryInfo(dir).LinkTarget is not null) continue;
-            foreach (var file in FindFiles(dir, name, depth - 1)) yield return file;
+            onFailure(path);
+            yield break;
+        }
+        var comparison = OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
+        foreach (var entry in entries)
+        {
+            if (entry is DirectoryInfo)
+            {
+                if (depth == 0 || (entry.Attributes & FileAttributes.ReparsePoint) != 0) continue;
+                foreach (var registry in FindEclipseRegistries(entry.FullName, depth - 1, onFailure)) yield return registry;
+            }
+            else if (entry.Name.Equals("org.eclipse.ui.ide.prefs", comparison))
+                yield return entry.FullName;
         }
     }
 }
