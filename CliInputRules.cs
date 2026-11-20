@@ -65,16 +65,6 @@ internal static class CliInputRules
                 break;
             case "chat messages":
                 ValidateTopicAndLocal();
-                // Apply only when this option still exists on the registered command.
-                if (Value("--schema") is { } schema)
-                {
-                    if (!schema.Equals("simple", StringComparison.OrdinalIgnoreCase)
-                        && !schema.Equals("rich", StringComparison.OrdinalIgnoreCase))
-                        throw new CliUsageException("--schema must be simple or rich.");
-                    if (schema.Equals("rich", StringComparison.OrdinalIgnoreCase)
-                        && Value("--format")?.Trim().ToLowerInvariant() is not ("json" or "jsonl"))
-                        throw new CliUsageException("--schema rich requires --format json or jsonl.");
-                }
                 break;
             case "chat search":
                 ValidateTopicAndLocal();

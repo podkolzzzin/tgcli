@@ -28,7 +28,7 @@ internal readonly record struct CliFailure(int ExitCode, string? Message)
             TelegramAuthorizationException => new(4, BoundedMessage(error.Message)),
             TdException native when TelegramRpcPolicy.Classify(native).Kind == TelegramRpcFailureKind.Authorization =>
                 new(4, TelegramAuthorizationException.FromNative(native).Message),
-            PartialResultException => new(3, BoundedMessage(error.Message)),
+            PartialResultException or BotWorkflowException { Status: "outcome_unknown" } => new(3, BoundedMessage(error.Message)),
             CliUsageException or ArgumentParseFailedException or ArgumentException or FormatException or ValidationException =>
                 new(2, BoundedMessage(error.Message)),
             _ => new(1, BoundedMessage(string.IsNullOrWhiteSpace(error.Message) ? error.GetType().Name : error.Message))

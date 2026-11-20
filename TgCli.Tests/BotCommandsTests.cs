@@ -122,6 +122,16 @@ public sealed class BotCommandsTests
     }
 
     [Fact]
+    public async Task AnUnconfirmedSendHasPartialResultExitStatus()
+    {
+        using var fixture = new Fixture();
+        fixture.Transport.Send = _ => Task.FromException<TdApi.Message>(new TimeoutException());
+        var error = await Assert.ThrowsAsync<BotWorkflowException>(() => fixture.Commands.Write("example_bot", "/start"));
+        Assert.Equal("outcome_unknown", fixture.Result.Value<string>("status"));
+        Assert.Equal(3, CliFailure.FromException(error).ExitCode);
+    }
+
+    [Fact]
     public async Task BotHistoryUsesSchemaEightAndDecimalReceiptIdentifiers()
     {
         using var fixture = new Fixture();
