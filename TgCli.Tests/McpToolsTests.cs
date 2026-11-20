@@ -86,8 +86,12 @@ public sealed class McpToolsTests
         var topicFields = topics.GetProperty("properties").GetProperty("items").GetProperty("items").GetProperty("properties");
         Assert.Equal("string", topicFields.GetProperty("topic_id").GetProperty("type").GetString());
 
-        var message = McpTools.Catalog.Single(tool => tool.Name == "message_get").OutputSchema!.Value.GetProperty("properties");
+        var output = McpTools.Catalog.Single(tool => tool.Name == "message_get").OutputSchema!.Value;
+        var message = output.GetProperty("properties");
         Assert.Equal("8.0", message.GetProperty("schema_version").GetProperty("const").GetString());
+        Assert.Contains(output.GetProperty("required").EnumerateArray(), name => name.GetString() == "topic_id");
+        Assert.Equal(["string", "null"], message.GetProperty("topic_id").GetProperty("type")
+            .EnumerateArray().Select(type => type.GetString()));
         Assert.Equal("string", message.GetProperty("attachments").GetProperty("items")
             .GetProperty("properties").GetProperty("file_id").GetProperty("type").GetString());
     }

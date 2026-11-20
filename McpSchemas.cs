@@ -46,7 +46,7 @@ internal static class McpSchemas
         ("https_url", Nullable("string")), ("https_fallback", Nullable("string")));
     private static JsonObject Message() => Object(("schema", Fixed(ExportSchema.Name)), ("schema_version", Fixed(ExportSchema.Version)),
         ("chat_id", Id()), ("message_id", Id()), ("source_chat_id", Id()), ("original_chat_id", Id()), ("original_message_id", Id()),
-        ("short_message_id", Id(nullable: true)), ("date", Timestamp()), ("edit_date", Timestamp(nullable: true)),
+        ("short_message_id", Id(nullable: true)), ("topic_id", Id(nullable: true)), ("date", Timestamp()), ("edit_date", Timestamp(nullable: true)),
         ("query", Nullable("string")), ("sender_user_id", Id(nullable: true)), ("sender_chat_id", Id(nullable: true)),
         ("reply_to_chat_id", Id(nullable: true)), ("reply_to_message_id", Id(nullable: true)),
         ("kind", Type("string")), ("text", Type("string")), ("attachments", Array(Attachment())),

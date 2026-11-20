@@ -23,6 +23,7 @@ sealed class FakeBackend : IMcpTelegramBackend
                 ["original_chat_id"] = chatId,
                 ["original_message_id"] = messageId,
                 ["short_message_id"] = null,
+                ["topic_id"] = null,
                 ["date"] = "2026-01-01T00:00:00.0000000Z",
                 ["edit_date"] = null,
                 ["query"] = null,

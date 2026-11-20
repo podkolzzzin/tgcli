@@ -177,6 +177,7 @@ public sealed class McpBackendParityTests : IDisposable
     public async Task LocalHistoryUsesOnlyLocalEnrichmentAndCannotClaimRemoteExhaustion()
     {
         var target = Message(MessageId, 1);
+        target.TopicId = new TdApi.MessageTopic.MessageTopicForum { ForumTopicId = 17 };
         target.SenderId = new TdApi.MessageSender.MessageSenderUser { UserId = 9007199254740993 };
         target.ReplyTo = new TdApi.MessageReplyTo.MessageReplyToMessage { ChatId = ChatId, MessageId = 1048576 };
         var requests = new List<string>();
@@ -201,6 +202,7 @@ public sealed class McpBackendParityTests : IDisposable
         var row = Assert.Single(result.GetProperty("items").EnumerateArray());
         Assert.Equal("8.0", row.GetProperty("schema_version").GetString());
         Assert.Equal("9007199254740993", row.GetProperty("sender_user_id").GetString());
+        Assert.Equal("17", row.GetProperty("topic_id").GetString());
         Assert.Equal("1048576", row.GetProperty("reply_target").GetProperty("message_id").GetString());
         Assert.Equal(["GetChat", "GetChatHistory", "GetChatHistory", "GetMessageLocally"], requests);
         Assert.False(result.GetProperty("complete").GetBoolean());
