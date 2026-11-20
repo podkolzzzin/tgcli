@@ -1,5 +1,4 @@
 using System.Buffers;
-using System.Globalization;
 using System.Text;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
@@ -50,7 +49,8 @@ internal sealed class ExportSnapshot
     public JObject Manifest { get; }
     public IReadOnlyList<ExportedMessage> Messages { get; }
 
-    public static ExportSnapshot Build(ExportRequest request, HistoryFetchResult history, ExportCache? previous)
+    public static ExportSnapshot Build(ExportRequest request, HistoryFetchResult history, ExportCache? previous,
+        IReadOnlyDictionary<long, HistoryVisibility>? visibility = null)
     {
         request.RequirePrincipal();
         var sources = history.SourceChats.ToHashSet();
@@ -73,10 +73,13 @@ internal sealed class ExportSnapshot
             throw new InvalidOperationException(
                 $"Export integrity check found incomplete history ({terminationReason}).");
 
+        var oldestBySource = new Dictionary<long, long>();
         foreach (var row in history.Messages)
         {
             if (!sources.Contains(row.SourceChatId) || row.Message.ChatId != row.SourceChatId || row.Message.Id <= 0)
                 throw new InvalidDataException("History traversal returned a message outside its source scope or without a valid ID.");
+            if (!oldestBySource.TryGetValue(row.SourceChatId, out var oldest) || row.Message.Id < oldest)
+                oldestBySource[row.SourceChatId] = row.Message.Id;
         }
 
         var messages = history.Messages.Where(request.Includes)
@@ -84,7 +87,6 @@ internal sealed class ExportSnapshot
         if (request.Local && messages.Length == 0)
             throw new InvalidOperationException("The local cache has no messages in the requested export scope.");
         var first = messages.Where(item => item.Message.Date > 0).MinBy(item => item.Message.Date);
-        var last = messages.Where(item => item.Message.Date > 0).MaxBy(item => item.Message.Date);
         if (request.ExpectSince is not null && (first is null ||
             DateTimeOffset.FromUnixTimeSeconds(first.Message.Date) > request.ExpectSince))
             throw new InvalidOperationException(
@@ -93,16 +95,15 @@ internal sealed class ExportSnapshot
             throw new InvalidOperationException(
                 $"The fetched message count is below --expect-count-min={request.ExpectCountMin}.");
 
-        var manifest = ChatHistory.BuildManifest(history);
+        var manifest = ChatHistory.BuildManifest(history, messages);
         manifest["schema"] = ExportSchema.Name;
         manifest["schema_version"] = ExportSchema.Version;
         manifest["snapshot_scope"] = request.Scope.DeepClone();
         manifest["source_chats"] = new JArray(sources.Order().Select(ExportRequest.FormatId));
         manifest["source"] = request.Local ? "local_cache" : "server_history";
         manifest["complete"] = complete;
-        manifest["message_count"] = messages.Length;
-        manifest["first_date"] = DateValue(first);
-        manifest["last_date"] = DateValue(last);
+        manifest["snapshot_kind"] = request.Checkpoint is not null && previous is null
+            ? "delta" : complete ? "snapshot" : "partial";
         manifest["termination_reason"] = terminationReason;
 
         var rows = request.HasRowIdentity ? Reconcile() : [];
@@ -129,7 +130,11 @@ internal sealed class ExportSnapshot
             foreach (var (key, cached) in previous?.Rows ?? new Dictionary<ExportRowKey, CachedExportRow>())
             {
                 if (current.ContainsKey(key)) continue;
-                merged.Add(exactAuthoritativeRefresh && !cached.IsDeleted
+                var missing = exactAuthoritativeRefresh && !cached.IsDeleted;
+                if (missing && !CoversPriorKey(key))
+                    throw new InvalidOperationException(
+                        $"Cannot verify history visibility for missing records in chat {key.ChatId}. The prior snapshot was preserved.");
+                merged.Add(missing
                     ? new SnapshotRow(key, 0, true)
                     : new SnapshotRow(key, cached.Date, cached.IsDeleted, cached));
             }
@@ -139,6 +144,13 @@ internal sealed class ExportSnapshot
             return merged.OrderBy(row => row.IsDeleted).ThenBy(row => row.Date)
                 .ThenBy(row => row.Key.ChatId).ThenBy(row => row.Key.MessageId).ToList();
         }
+
+        bool CoversPriorKey(ExportRowKey key) => visibility?.GetValueOrDefault(key.ChatId) switch
+        {
+            HistoryVisibility.Full => true,
+            HistoryVisibility.NeedsOlderAnchor => oldestBySource.TryGetValue(key.ChatId, out var oldest) && oldest <= key.MessageId,
+            _ => false
+        };
     }
 
     public async Task WriteAsync(TextWriter writer, Func<ExportedMessage, Task<JObject>> render,
@@ -180,7 +192,4 @@ internal sealed class ExportSnapshot
             ArrayPool<byte>.Shared.Return(bytes);
         }
     }
-
-    private static JValue DateValue(ExportedMessage? row) => row is null ? JValue.CreateNull() :
-        new JValue(DateTimeOffset.FromUnixTimeSeconds(row.Message.Date).ToString("O", CultureInfo.InvariantCulture));
 }

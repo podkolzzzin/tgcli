@@ -114,6 +114,117 @@ public sealed class ExportSnapshotTests
         Assert.Equal("101", ReadManifest(copied)["snapshot_scope"]?.Value<string>("principal_user_id"));
     }
 
+    [Theory]
+    [InlineData("local")]
+    [InlineData("bounded")]
+    [InlineData("delta")]
+    public async Task LimitedViewCannotReplaceVerifiedSnapshotButCanUseItsOwnDestination(string mode)
+    {
+        using var work = new ExportDirectory();
+        var history = History([10], Message(10, 1, 100, "old"), Message(10, 2, 200, "latest"));
+        var original = await Export(work.Output, Request(), history);
+        var originalData = File.ReadAllBytes(work.Output);
+        var originalManifest = File.ReadAllBytes(work.Output + ".manifest.json");
+
+        var request = Request(local: mode == "local", all: mode != "bounded",
+            token: mode == "delta" ? original.Value<string>("resume_token") : null);
+        var view = mode == "delta" ? history : History([10], Message(10, 2, 200, "latest"));
+        await Assert.ThrowsAsync<InvalidOperationException>(() => Export(work.Output, request, view));
+        Assert.Equal(originalData, File.ReadAllBytes(work.Output));
+        Assert.Equal(originalManifest, File.ReadAllBytes(work.Output + ".manifest.json"));
+
+        var separate = Path.Combine(work.Root, "view.jsonl");
+        var separateManifest = await Export(separate, request, view);
+        await Export(separate, request, view);
+        Assert.Equal(mode == "delta" ? "delta" : "partial", separateManifest.Value<string>("snapshot_kind"));
+        Assert.Equal(mode == "delta" ? 0 : 1, ReadRows(separate).Count());
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task IncrementalAbsenceWithoutFullHistoryVisibilityPreservesTheCommittedGeneration(bool allHistoryAvailable)
+    {
+        using var work = new ExportDirectory();
+        await Export(work.Output, Request(), History([10], Message(10, 1, 100, "old"), Message(10, 2, 200, "latest")));
+        var originalData = File.ReadAllBytes(work.Output);
+        var originalManifest = File.ReadAllBytes(work.Output + ".manifest.json");
+        var narrower = History([10], Message(10, 2, 200, "still visible"));
+
+        var visibility = ExportHistoryVisibility.ClassifySupergroup(
+            new TdApi.Supergroup { Status = new TdApi.ChatMemberStatus.ChatMemberStatusAdministrator() }, allHistoryAvailable);
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            Export(work.Output, Request(incremental: true), narrower, visibility: visibility));
+
+        Assert.Equal(originalData, File.ReadAllBytes(work.Output));
+        Assert.Equal(originalManifest, File.ReadAllBytes(work.Output + ".manifest.json"));
+    }
+
+    [Fact]
+    public async Task PrivateSupergroupOlderAnchorAllowsAbsenceInferenceWithinItsVisibleRange()
+    {
+        using var work = new ExportDirectory();
+        var older = Message(10, 1, 100, "older retained message");
+        await Export(work.Output, Request(), History([10], older, Message(10, 2, 200, "absent")));
+
+        var visible = History([10], older, Message(10, 3, 300, "new"));
+        var visibility = ExportHistoryVisibility.ClassifySupergroup(
+            new TdApi.Supergroup { Status = new TdApi.ChatMemberStatus.ChatMemberStatusAdministrator() },
+            allHistoryAvailable: true);
+        await Export(work.Output, Request(incremental: true), visible, visibility: visibility);
+
+        Assert.Equal(2L, Assert.Single(ReadRows(work.Output), row => row.Value<bool>("is_deleted")).Value<long>("message_id"));
+    }
+
+    [Theory]
+    [InlineData("channel")]
+    [InlineData("forum")]
+    [InlineData("public")]
+    [InlineData("linked")]
+    public void AlwaysVisibleGroupTypesRequireCurrentMembership(string groupType)
+    {
+        var group = new TdApi.Supergroup
+        {
+            IsChannel = groupType == "channel",
+            IsForum = groupType == "forum",
+            HasLinkedChat = groupType == "linked",
+            Usernames = groupType == "public" ? new TdApi.Usernames { ActiveUsernames = ["public"] } : null,
+            Status = new TdApi.ChatMemberStatus.ChatMemberStatusMember()
+        };
+        Assert.Equal(HistoryVisibility.Full, ExportHistoryVisibility.ClassifySupergroup(group, allHistoryAvailable: false));
+
+        group.Status = new TdApi.ChatMemberStatus.ChatMemberStatusLeft();
+        Assert.Equal(HistoryVisibility.Unverified, ExportHistoryVisibility.ClassifySupergroup(group, allHistoryAvailable: true));
+    }
+
+    [Fact]
+    public void ChannelRangeAndPostBoundariesUseFilteredRows()
+    {
+        var history = ChannelHistory(1, 100);
+        var request = Request(sinceMessageId: 99L << 20);
+        var manifest = ExportSnapshot.Build(request, history, null).Manifest;
+
+        Assert.Equal(2, manifest.Value<int>("fetched_count"));
+        Assert.Equal(1, manifest.Value<int>("message_count"));
+        Assert.Equal(100L, manifest["first_post"]?.Value<long>("public_id"));
+        Assert.Equal(100L, manifest["last_post"]?.Value<long>("public_id"));
+        Assert.Equal(0L, manifest["public_id_range"]?.Value<long>("missing_count"));
+    }
+
+    [Fact]
+    public void SparseChannelRangeReportsNumericCountWithCappedSample()
+    {
+        var manifest = ExportSnapshot.Build(Request(), ChannelHistory(1, 10_000), null).Manifest;
+        var range = Assert.IsType<JObject>(manifest["public_id_range"]);
+        var sample = Assert.IsType<JArray>(range["missing_public_ids"]);
+
+        Assert.Equal(9_998L, range.Value<long>("missing_count"));
+        Assert.True(range.Value<bool>("missing_public_ids_truncated"));
+        Assert.Equal(100, sample.Count);
+        Assert.Equal(2L, sample[0]!.Value<long>());
+        Assert.Equal(101L, sample[^1]!.Value<long>());
+    }
+
     [Fact]
     public async Task ScopedCheckpointNeverComparesIdsAcrossMigratedChats()
     {
@@ -337,18 +448,25 @@ public sealed class ExportSnapshotTests
 
     private static ExportRequest Request(long chatId = 10, bool resume = false, bool incremental = false,
         long sinceMessageId = 0, string? fields = null, string? token = null, string? expectSince = null,
-        long principal = Principal) =>
-        ExportRequest.Create(chatId, "snapshot.jsonl", "jsonl", resume: resume, incremental: incremental,
+        long principal = Principal, bool local = false, bool all = true) =>
+        ExportRequest.Create(chatId, "snapshot.jsonl", "jsonl", all: all, local: local, resume: resume, incremental: incremental,
             sinceMessageId: sinceMessageId, fields: fields, resumeToken: token, expectSince: expectSince).BindPrincipal(principal);
 
     private static async Task<JObject> Export(string path, ExportRequest request, HistoryFetchResult history,
-        Action<string, string>? replace = null)
+        Action<string, string>? replace = null, HistoryVisibility visibility = HistoryVisibility.Full)
     {
         using var store = ExportSnapshotStore.Open(path, replace);
         var previous = request.UpdatesSnapshot ? store.ReadCache(request, Cancellation) : null;
-        var snapshot = ExportSnapshot.Build(request, history, previous);
+        var snapshot = ExportSnapshot.Build(request, history, previous, history.SourceChats.ToDictionary(id => id, _ => visibility));
         return await store.CommitAsync(snapshot.Manifest,
             writer => snapshot.WriteAsync(writer, row => Task.FromResult(Render(row)), Cancellation), Cancellation);
+    }
+
+    private static HistoryFetchResult ChannelHistory(long firstPost, long lastPost)
+    {
+        var history = History([10], Message(10, firstPost << 20, 100, "first"), Message(10, lastPost << 20, 200, "last"));
+        history.ChannelChats.Add(10);
+        return history;
     }
 
     private static HistoryFetchResult History(long[] sources, params ExportedMessage[] messages)

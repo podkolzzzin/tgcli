@@ -239,22 +239,24 @@ internal static class ChatHistory
         return [predecessor.Id, chat.Id];
     }
 
-    public static JObject BuildManifest(HistoryFetchResult history)
+    public static JObject BuildManifest(HistoryFetchResult history, IReadOnlyList<ExportedMessage>? selected = null)
     {
-        var messages = history.Messages;
+        var messages = selected ?? history.Messages;
+        var newestFetched = history.Messages.MaxBy(x => x.Message.Date);
         var dates = messages.Select(x => x.Message.Date).Where(x => x > 0).ToArray();
-        var publicIds = messages
+        var channelMessages = messages
             .Where(x => history.ChannelChats.Contains(x.SourceChatId))
+            .Where(x => GetShortMessageId(x.Message.Id) > 0)
+            .ToArray();
+        var publicIds = channelMessages
             .Select(x => GetShortMessageId(x.Message.Id))
-            .Where(x => x > 0)
             .Distinct()
             .Order()
             .ToArray();
-        var missingPublicIds = GetMissingPublicIds(publicIds);
         var manifest = new JObject
         {
             ["message_count"] = messages.Count,
-            ["fetched_count"] = messages.Count,
+            ["fetched_count"] = history.Messages.Count,
             ["first_date"] = dates.Length == 0 ? JValue.CreateNull() : FormatDate(dates.Min()),
             ["last_date"] = dates.Length == 0 ? JValue.CreateNull() : FormatDate(dates.Max()),
             ["source_chats"] = new JArray(history.SourceChats.Distinct()),
@@ -265,10 +267,10 @@ internal static class ChatHistory
             ["gaps"] = new JArray(history.Gaps),
             ["inaccessible_messages"] = history.InaccessibleMessages,
             ["oldest_reachable_message_by_chat"] = JObject.FromObject(history.OldestReachableByChat),
-            ["newest_fetched_message"] = messages.Count == 0 ? JValue.CreateNull() : new JObject
+            ["newest_fetched_message"] = newestFetched is null ? JValue.CreateNull() : new JObject
             {
-                ["chat_id"] = messages.MaxBy(x => x.Message.Date)!.Message.ChatId,
-                ["message_id"] = messages.MaxBy(x => x.Message.Date)!.Message.Id
+                ["chat_id"] = newestFetched.Message.ChatId,
+                ["message_id"] = newestFetched.Message.Id
             },
             ["termination_reason"] = history.TerminationReason,
             ["warnings"] = new JArray(history.Warnings),
@@ -279,26 +281,20 @@ internal static class ChatHistory
 
         if (publicIds.Length > 0)
         {
-            var channelMessages = messages.Where(x => history.ChannelChats.Contains(x.SourceChatId)).ToArray();
             var firstPost = channelMessages.Where(x => x.Message.Date > 0).MinBy(x => x.Message.Date) ?? channelMessages.MinBy(x => x.Message.Id)!;
             var lastPost = channelMessages.Where(x => x.Message.Date > 0).MaxBy(x => x.Message.Date) ?? channelMessages.MaxBy(x => x.Message.Id)!;
-            var latestPublicId = publicIds[^1];
-            var missing = missingPublicIds.ToArray();
+            var missingCount = publicIds[^1] - publicIds[0] + 1 - publicIds.LongLength;
+            var missingSample = SampleMissingPublicIds(publicIds).ToArray();
             manifest["public_id_range"] = new JObject
             {
                 ["first"] = publicIds[0],
-                ["last"] = latestPublicId,
-                ["missing_count"] = missing.Length,
-                ["missing_public_ids"] = new JArray(missing)
+                ["last"] = publicIds[^1],
+                ["missing_count"] = missingCount,
+                ["missing_public_ids"] = new JArray(missingSample),
+                ["missing_public_ids_truncated"] = missingCount > missingSample.Length
             };
             manifest["first_post"] = ToPostBoundary(firstPost);
             manifest["last_post"] = ToPostBoundary(lastPost);
-
-            if (latestPublicId > messages.Count && latestPublicId - messages.Count > Math.Max(10, latestPublicId / 20))
-            {
-                history.Warnings.Add($"Latest public id {latestPublicId} is much higher than exported count {messages.Count}; inspect public_id_range.missing_public_ids for gaps.");
-                ((JArray)manifest["warnings"]!).Add(history.Warnings[^1]);
-            }
         }
 
         return manifest;
@@ -312,19 +308,15 @@ internal static class ChatHistory
         ["date"] = item.Message.Date == 0 ? JValue.CreateNull() : FormatDate(item.Message.Date)
     };
 
-    private static IEnumerable<long> GetMissingPublicIds(long[] publicIds)
+    private static IEnumerable<long> SampleMissingPublicIds(long[] publicIds)
     {
-        if (publicIds.Length < 2)
+        var remaining = 100;
+        for (var i = 1; i < publicIds.Length && remaining > 0; i++)
         {
-            yield break;
-        }
-
-        var present = publicIds.ToHashSet();
-        for (var id = publicIds[0]; id <= publicIds[^1]; id++)
-        {
-            if (!present.Contains(id))
+            for (var id = publicIds[i - 1] + 1; id < publicIds[i] && remaining > 0; id++)
             {
                 yield return id;
+                remaining--;
             }
         }
     }

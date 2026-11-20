@@ -174,6 +174,14 @@ internal sealed class ExportSnapshotStore : IDisposable
         CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
+        if (IsLimitedView(metadata) && File.Exists(_manifestPath) && TryLoadObject(_manifestPath) is { } existing &&
+            existing["complete"]?.Type == JTokenType.Boolean && existing.Value<bool>("complete") &&
+            !IsLimitedView(existing) && MatchesCommittedData(existing))
+        {
+            throw new InvalidOperationException(
+                "A limited export or checkpoint delta cannot replace a verified snapshot. Choose a separate output path.");
+        }
+
         var generation = Guid.NewGuid();
         var (data, manifest, previous, journal) = Stages(generation);
         try
@@ -260,8 +268,17 @@ internal sealed class ExportSnapshotStore : IDisposable
     }
 
     private bool IsCommittedManifest(string path) =>
-        File.Exists(path) && TryLoadObject(path) is { } json && TryGetGeneration(json, out _) &&
-        MatchesHash(_path, json.Value<string>("output_sha256"));
+        File.Exists(path) && TryLoadObject(path) is { } json && MatchesCommittedData(json);
+
+    private bool MatchesCommittedData(JObject manifest) =>
+        TryGetGeneration(manifest, out _) && File.Exists(_path) &&
+        manifest["output_byte_count"]?.Type == JTokenType.Integer &&
+        new FileInfo(_path).Length == manifest.Value<long>("output_byte_count") &&
+        MatchesHash(_path, manifest.Value<string>("output_sha256"));
+
+    private static bool IsLimitedView(JObject manifest) =>
+        (manifest["complete"]?.Type == JTokenType.Boolean && !manifest.Value<bool>("complete")) ||
+        manifest.Value<string>("snapshot_kind") is "partial" or "delta";
 
     private void Publish(string data, string manifest)
     {

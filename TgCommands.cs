@@ -1139,7 +1139,10 @@ public sealed class ChatCommands
 
         var history = await ChatHistory.FetchAsync(tg, chatId, request.All, local, maxPages,
             followMigrations: request.All, cancellationToken: cancellationToken);
-        var snapshot = ExportSnapshot.Build(request, history, previous);
+        var visibility = history.Complete && request.Incremental && previous is not null
+            ? await ExportHistoryVisibility.ReadAsync(tg, previous.Sources, cancellationToken)
+            : null;
+        var snapshot = ExportSnapshot.Build(request, history, previous, visibility);
         var title = request.Format == OutputFormat.Md
             ? (await tg.Client.GetChatAsync(chatId).WaitAsync(cancellationToken)).Title
             : null;
