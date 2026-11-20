@@ -1,5 +1,4 @@
 using Newtonsoft.Json;
-using TdLib;
 
 namespace TgCli;
 
@@ -9,6 +8,22 @@ internal static class TranscriptionCommands
     {
         var options = TranscriptionOptions.Create(enabled, language, command, commandArguments);
         return options is null ? null : new(options, () => new WhisperMediaTranscriber());
+    }
+
+    internal static string[]? ParseArguments(string? value)
+    {
+        if (value is null) return null;
+        try
+        {
+            var arguments = System.Text.Json.JsonSerializer.Deserialize<string[]>(value);
+            if (arguments is not null && arguments.All(argument => argument is not null && !argument.Contains('\0')))
+                return arguments;
+        }
+        catch (System.Text.Json.JsonException)
+        {
+            // Untrusted input can contain shell or credential text. Return a fixed usage description.
+        }
+        throw new ArgumentException("Transcription command arguments must be a JSON array of strings.");
     }
 
     public static void ValidateFormat(string format)
@@ -23,8 +38,8 @@ internal static class TranscriptionCommands
         else
         {
             var json = transcript.ToJson();
-            if (chatId is not null) json["chat_id"] = chatId;
-            if (messageId is not null) json["message_id"] = messageId;
+            if (chatId is not null) json["chat_id"] = Wire.NullableId(chatId);
+            if (messageId is not null) json["message_id"] = Wire.NullableId(messageId);
             Console.WriteLine(json.ToString(Formatting.None));
         }
     }

@@ -1,7 +1,5 @@
 using System.Globalization;
-using System.Text.Encodings.Web;
-using System.Text.Json;
-using System.Text.Json.Serialization;
+using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using TdLib;
 
@@ -16,56 +14,14 @@ internal enum OutputFormat
     Md
 }
 
-internal sealed record ChatRow(
-    [property: JsonPropertyName("chat_id")]
-    long ChatId,
-    [property: JsonPropertyName("title")]
-    string Title,
-    [property: JsonPropertyName("type")]
-    string Type,
-    [property: JsonPropertyName("username")]
-    string? Username,
-    [property: JsonPropertyName("unread")]
-    int Unread,
-    [property: JsonPropertyName("last_message")]
-    string? LastMessage);
+internal sealed record ChatRow(long ChatId, string Title, string Type, string? Username, int Unread, string? LastMessage);
 
-internal sealed record MessageRow(
-    [property: JsonPropertyName("chat_id")]
-    long ChatId,
-    [property: JsonPropertyName("message_id")]
-    long MessageId,
-    [property: JsonPropertyName("date")]
-    string Date,
-    [property: JsonPropertyName("sender")]
-    string Sender,
-    [property: JsonPropertyName("sender_name")]
-    string SenderName,
-    [property: JsonPropertyName("kind")]
-    string Kind,
-    [property: JsonPropertyName("file_id")]
-    int? FileId,
-    [property: JsonPropertyName("text")]
-    string Text,
-    [property: JsonPropertyName("reply_to_message_id")]
-    long? ReplyToMessageId,
-    [property: JsonPropertyName("tg_url")] string? TgUrl = null,
-    [property: JsonPropertyName("https_url")] string? HttpsUrl = null,
-    [property: JsonPropertyName("https_fallback")] string? HttpsFallback = null,
-    [property: JsonPropertyName("query")]
-    string? Query = null,
-    [property: JsonPropertyName("original_chat_id")]
-    long? OriginalChatId = null,
-    [property: JsonPropertyName("original_message_id")]
-    long? OriginalMessageId = null);
+internal sealed record MessageRow(long ChatId, long MessageId, string Date, string Sender, string? SenderName,
+    string Kind, int? FileId, string Text, long? ReplyToMessageId, string? TgUrl, string? HttpsUrl, string? HttpsFallback,
+    string? Query, long OriginalChatId, long OriginalMessageId);
 
 internal static class Output
 {
-    private static readonly JsonSerializerOptions JsonOptions = new()
-    {
-        Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping
-    };
-
     public static OutputFormat ParseFormat(string format)
     {
         return format.Trim().ToLowerInvariant() switch
@@ -79,113 +35,126 @@ internal static class Output
         };
     }
 
-    public static async Task PrintChatsAsync(TelegramSession tg, IReadOnlyCollection<long> chatIds, string format = "tsv")
+    internal static async Task PrintChatsAsync(TelegramSession tg, IReadOnlyCollection<long> chatIds, OutputFormat format,
+        JObject coverage, CancellationToken cancellationToken, bool local = false)
     {
-        var rows = new List<ChatRow>();
+        var rows = new List<ChatRow>(chatIds.Count);
         foreach (var chatId in chatIds)
         {
-            rows.Add(await BuildChatRowAsync(tg, await tg.Client.GetChatAsync(chatId)));
+            cancellationToken.ThrowIfCancellationRequested();
+            var chat = await TelegramOperations.AwaitReadAsync(tg.Client.GetChatAsync(chatId), cancellationToken, true);
+            rows.Add(await BuildChatRowAsync(tg, chat, local, cancellationToken));
         }
 
-        PrintChats(rows, ParseFormat(format), Console.Out);
+        tg.CheckActive();
+        cancellationToken.ThrowIfCancellationRequested();
+        PrintChats(rows, format, Console.Out, coverage);
+        if (format != OutputFormat.Json) WriteSummary(coverage, cancellationToken);
     }
 
-    public static async Task PrintChatAsync(TelegramSession tg, TdApi.Chat chat, string format = "tsv")
+    internal static async Task PrintChatAsync(TelegramSession tg, TdApi.Chat chat, OutputFormat format,
+        CancellationToken cancellationToken)
     {
-        PrintChats([await BuildChatRowAsync(tg, chat)], ParseFormat(format), Console.Out);
+        var row = await BuildChatRowAsync(tg, chat, cancellationToken: cancellationToken);
+        tg.CheckActive();
+        cancellationToken.ThrowIfCancellationRequested();
+        if (format is OutputFormat.Json or OutputFormat.Jsonl)
+            Console.WriteLine(ToChatJson(row).ToString(Formatting.None));
+        else
+            PrintChats([row], format, Console.Out);
     }
 
-    public static async Task PrintMessagesAsync(
-        TelegramSession tg,
-        IEnumerable<TdApi.Message> messages,
-        string format = "tsv",
-        string? query = null,
-        bool includeLinks = false)
+    internal static async Task WriteReadMessagesAsync(TelegramSession tg, IEnumerable<TdApi.Message> messages,
+        OutputFormat format, JObject coverage, CancellationToken cancellationToken, bool local = false, bool includeLinks = true)
     {
-        await WriteMessagesAsync(Console.Out, tg, messages, ParseFormat(format), query: query, includeLinks: includeLinks);
+        await WriteExportedMessagesAsync(Console.Out, tg, messages.Select(ToExportedMessage), format,
+            includeLinks: includeLinks, cancellationToken: cancellationToken, local: local, coverage: coverage);
+        if (format != OutputFormat.Json) WriteSummary(coverage, cancellationToken);
     }
 
-    public static async Task WriteMessagesAsync(
-        TextWriter writer,
-        TelegramSession tg,
-        IEnumerable<TdApi.Message> messages,
-        OutputFormat format,
-        string? title = null,
-        string? query = null,
-        bool includeLinks = false)
-    {
-        var rows = new List<MessageRow>();
-        foreach (var message in messages.OrderBy(x => x.Id))
-        {
-            rows.Add(await BuildMessageRowAsync(tg, message, query, includeLinks));
-        }
+    internal static ExportedMessage ToExportedMessage(TdApi.Message message) =>
+        new(message, message.ChatId, message.ChatId, message.Id);
 
-        WriteRows(writer, rows, format, title, includeLinks);
-    }
+    internal static Task WriteExportedMessagesAsync(TextWriter writer, TelegramSession tg,
+        IEnumerable<ExportedMessage> messages, OutputFormat format, string? title = null, bool includeLinks = false,
+        string? fields = null, MediaTranscription? transcription = null, CancellationToken cancellationToken = default,
+        bool local = false, JObject? coverage = null) =>
+        WriteMessageGroupsAsync(writer, tg, messages.Select(x => (x, (string?)null)), format, title, includeLinks,
+            fields, transcription, cancellationToken, local, coverage);
 
-    public static async Task WriteExportedMessagesAsync(
-        TextWriter writer,
-        TelegramSession tg,
-        IEnumerable<ExportedMessage> messages,
-        OutputFormat format,
-        string? title = null,
-        bool includeLinks = false,
-        string? fields = null,
-        MediaTranscription? transcription = null,
-        CancellationToken cancellationToken = default)
+    internal static async Task WriteMessageGroupsAsync(TextWriter writer, TelegramSession tg,
+        IEnumerable<(ExportedMessage Item, string? Query)> messages, OutputFormat format, string? title = null,
+        bool includeLinks = true, string? fields = null, MediaTranscription? transcription = null,
+        CancellationToken cancellationToken = default, bool local = false, JObject? coverage = null)
     {
+        var ordered = messages.GroupBy(x => x.Query, StringComparer.Ordinal).SelectMany(group =>
+            group.OrderBy(x => x.Item.Message.Date).ThenBy(x => x.Item.Message.ChatId).ThenBy(x => x.Item.Message.Id));
         if (format is OutputFormat.Jsonl or OutputFormat.Json)
         {
-            var array = format == OutputFormat.Json;
-            if (array) writer.Write('[');
-            var first = true;
-            foreach (var item in messages.OrderBy(x => x.Message.Date).ThenBy(x => x.Message.ChatId).ThenBy(x => x.Message.Id))
-            {
-                var value = (await BuildExportedRowAsync(tg, item, includeLinks, fields, transcription, cancellationToken))
-                    .ToString(Newtonsoft.Json.Formatting.None);
-                if (array)
-                {
-                    if (!first) writer.Write(',');
-                    await writer.WriteAsync(value.AsMemory(), cancellationToken);
-                    first = false;
-                }
-                else
-                {
-                    await writer.WriteLineAsync(value.AsMemory(), cancellationToken);
-                }
-            }
-            if (array) writer.WriteLine(']');
+            await WriteJsonMessagesAsync(writer, ordered, format, coverage,
+                (item, query, token) => BuildExportedRowAsync(tg, item, includeLinks, fields, transcription, token, local, query),
+                cancellationToken);
             return;
         }
 
         var rows = new List<MessageRow>();
-        var ordered = format == OutputFormat.Md
-            ? messages.OrderBy(x => x.Message.Date).ThenBy(x => x.Message.ChatId).ThenBy(x => x.Message.Id)
-            : messages.OrderBy(x => x.Message.Id);
-        foreach (var item in ordered)
+        foreach (var (item, query) in ordered)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            var row = await BuildMessageRowAsync(tg, item.Message, null, includeLinks);
+            var row = await BuildMessageRowAsync(tg, item, query, includeLinks, local, cancellationToken);
             var primary = MessageFiles.GetPrimaryAttachment(item.Message.Content);
-            var transcript = primary is null ? null : await MediaTranscription.TranscribeAttachmentAsync(
-                primary, transcription, f => MediaTranscription.DownloadAsync(tg, f, cancellationToken), cancellationToken);
-            rows.Add(row with
-            {
-                OriginalChatId = item.OriginalChatId,
-                OriginalMessageId = item.OriginalMessageId,
-                Text = transcript is null ? row.Text : MediaTranscription.AppendToCaption(row.Text, transcript)
-            });
+            var transcript = primary is null ? null : await MediaTranscription.TranscribeAttachmentAsync(primary, transcription,
+                f => MediaTranscription.DownloadAsync(tg, f, cancellationToken, local, item.Message.ChatId, item.Message.Id),
+                cancellationToken);
+            rows.Add(row with { Text = transcript is null ? row.Text : MediaTranscription.AppendToCaption(row.Text, transcript) });
         }
-
+        tg.CheckActive();
+        cancellationToken.ThrowIfCancellationRequested();
         WriteRows(writer, rows, format, title, includeLinks);
+    }
+
+    internal static async Task WriteJsonMessagesAsync(TextWriter writer,
+        IEnumerable<(ExportedMessage Item, string? Query)> ordered, OutputFormat format, JObject? coverage,
+        Func<ExportedMessage, string?, CancellationToken, Task<JObject>> enrich, CancellationToken cancellationToken)
+    {
+        var rows = format == OutputFormat.Json ? new JArray() : null;
+        foreach (var (item, query) in ordered)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var row = await enrich(item, query, cancellationToken);
+            cancellationToken.ThrowIfCancellationRequested();
+            if (rows is not null) rows.Add(row);
+            else await writer.WriteLineAsync(row.ToString(Formatting.None).AsMemory(), cancellationToken);
+        }
+        cancellationToken.ThrowIfCancellationRequested();
+        if (rows is not null) WriteJsonCollection(writer, rows, coverage);
+    }
+
+    internal static void WriteSummary(JObject summary, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        Console.Error.WriteLine(summary.ToString(Formatting.None));
+    }
+
+    internal static void WriteJsonCollection(TextWriter writer, JArray rows, JObject? coverage)
+    {
+        if (coverage is null) writer.WriteLine(rows.ToString(Formatting.None));
+        else
+        {
+            coverage["items"] = rows;
+            writer.WriteLine(coverage.ToString(Formatting.None));
+        }
     }
 
     internal static async Task<JObject> BuildExportedRowAsync(
         TelegramSession tg, ExportedMessage item, bool includeLinks, string? fields, MediaTranscription? transcription,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken, bool local = false, string? query = null)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        return SelectFields(await ExportSchema.BuildMessageAsync(tg, item, includeLinks, transcription, cancellationToken), fields);
+        var row = await ExportSchema.BuildMessageAsync(tg, item, includeLinks, transcription, cancellationToken, local, query);
+        tg.CheckActive();
+        cancellationToken.ThrowIfCancellationRequested();
+        return SelectFields(row, fields);
     }
 
     private static JObject SelectFields(JObject value, string? fields)
@@ -206,7 +175,7 @@ internal static class Output
         return new JObject(value.Properties().Where(property => names.Contains(property.Name)));
     }
 
-    internal static void PrintChats(IEnumerable<ChatRow> rows, OutputFormat format, TextWriter writer)
+    internal static void PrintChats(IEnumerable<ChatRow> rows, OutputFormat format, TextWriter writer, JObject? coverage = null)
     {
         switch (format)
         {
@@ -225,12 +194,12 @@ internal static class Output
                 break;
 
             case OutputFormat.Json:
-                writer.WriteLine(new JArray(rows.Select(ToChatJson)).ToString(Newtonsoft.Json.Formatting.None));
+                WriteJsonCollection(writer, new JArray(rows.Select(ToChatJson)), coverage);
                 break;
 
             case OutputFormat.Jsonl:
                 foreach (var row in rows)
-                    writer.WriteLine(ToChatJson(row).ToString(Newtonsoft.Json.Formatting.None));
+                    writer.WriteLine(ToChatJson(row).ToString(Formatting.None));
                 break;
 
             case OutputFormat.Plain:
@@ -263,24 +232,26 @@ internal static class Output
         switch (format)
         {
             case OutputFormat.Plain:
-                foreach (var row in rows.OrderByDescending(x => x.MessageId))
+                foreach (var row in rows)
                 {
                     writer.WriteLine(string.IsNullOrWhiteSpace(row.Text) ? row.Kind : row.Text);
                 }
                 break;
 
             case OutputFormat.Tsv:
-                writer.WriteLine(includeLinks
+                var withQueries = rows.Any(row => row.Query is not null);
+                var header = includeLinks
                     ? "chat_id\tmessage_id\toriginal_chat_id\toriginal_message_id\tdate\tsender\tsender_name\tkind\tfile_id\treply_to_message_id\ttg_url\thttps_url\thttps_fallback\ttext"
-                    : "chat_id\tmessage_id\toriginal_chat_id\toriginal_message_id\tdate\tsender\tsender_name\tkind\tfile_id\treply_to_message_id\ttext");
-                foreach (var row in rows.OrderByDescending(x => x.MessageId))
+                    : "chat_id\tmessage_id\toriginal_chat_id\toriginal_message_id\tdate\tsender\tsender_name\tkind\tfile_id\treply_to_message_id\ttext";
+                writer.WriteLine(withQueries ? "query\t" + header : header);
+                foreach (var row in rows)
                 {
                     var values = new List<string>
                     {
                         row.ChatId.ToString(CultureInfo.InvariantCulture),
                         row.MessageId.ToString(CultureInfo.InvariantCulture),
-                        row.OriginalChatId?.ToString(CultureInfo.InvariantCulture) ?? string.Empty,
-                        row.OriginalMessageId?.ToString(CultureInfo.InvariantCulture) ?? string.Empty,
+                        Wire.Id(row.OriginalChatId),
+                        Wire.Id(row.OriginalMessageId),
                         Clean(row.Date),
                         Clean(row.Sender),
                         Clean(row.SenderName),
@@ -296,20 +267,10 @@ internal static class Output
                         values.Add(Clean(row.HttpsFallback));
                     }
 
+                    if (withQueries) values.Insert(0, Clean(row.Query));
                     values.Add(Clean(row.Text));
                     writer.WriteLine(string.Join('\t', values));
                 }
-                break;
-
-            case OutputFormat.Jsonl:
-                foreach (var row in rows)
-                {
-                    writer.WriteLine(JsonSerializer.Serialize(ToJsonRow(row, includeLinks), JsonOptions));
-                }
-                break;
-
-            case OutputFormat.Json:
-                writer.WriteLine(JsonSerializer.Serialize(rows.Select(x => ToJsonRow(x, includeLinks)), JsonOptions));
                 break;
 
             case OutputFormat.Md:
@@ -388,12 +349,16 @@ internal static class Output
 
     private static async Task<MessageRow> BuildMessageRowAsync(
         TelegramSession tg,
-        TdApi.Message message,
+        ExportedMessage item,
         string? query,
-        bool includeLinks)
+        bool includeLinks,
+        bool local,
+        CancellationToken cancellationToken)
     {
+        var message = item.Message;
         var attachment = MessageFiles.GetPrimaryAttachment(message.Content);
-        var links = includeLinks ? await MessageLinks.BuildAsync(tg, message.ChatId, message.Id) : null;
+        var links = !includeLinks ? null : local ? Wire.LocalLink(message.ChatId, message.Id)
+            : await MessageLinks.BuildAsync(tg, message.ChatId, message.Id, cancellationToken, retainNativeOperation: true);
         if (attachment is not null)
         {
             await AttachmentIndex.RecordAsync(tg.SessionDirectory, message.ChatId, message.Id, [attachment]);
@@ -401,9 +366,9 @@ internal static class Output
         return new MessageRow(
             message.ChatId,
             message.Id,
-            DateTimeOffset.FromUnixTimeSeconds(message.Date).LocalDateTime.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture),
+            Wire.Timestamp(message.Date),
             FormatSender(message.SenderId),
-            await FormatSenderNameAsync(tg, message.SenderId),
+            local ? null : await FormatSenderNameAsync(tg, message.SenderId, cancellationToken),
             attachment?.Kind ?? MessageFiles.GetKind(message.Content),
             attachment?.FileId,
             MessageFiles.GetMessageText(message.Content),
@@ -411,7 +376,9 @@ internal static class Output
             links?.TgUrl,
             links?.HttpsUrl,
             links?.HttpsFallback,
-            query);
+            query,
+            item.OriginalChatId,
+            item.OriginalMessageId);
     }
 
     private static string? SummarizeMessage(TdApi.Message? message)
@@ -449,20 +416,23 @@ internal static class Output
         };
     }
 
-    private static async Task<string> FormatSenderNameAsync(TelegramSession tg, TdApi.MessageSender? sender)
+    private static async Task<string?> FormatSenderNameAsync(TelegramSession tg, TdApi.MessageSender? sender,
+        CancellationToken cancellationToken)
     {
         try
         {
             return sender switch
             {
-                TdApi.MessageSender.MessageSenderUser user => FormatUser(await tg.Client.GetUserAsync(user.UserId)),
-                TdApi.MessageSender.MessageSenderChat chat => (await tg.Client.GetChatAsync(chat.ChatId)).Title,
-                _ => string.Empty
+                TdApi.MessageSender.MessageSenderUser user => FormatUser(await TelegramOperations.AwaitReadAsync(
+                    tg.Client.GetUserAsync(user.UserId), cancellationToken, retainNativeOperation: true)),
+                TdApi.MessageSender.MessageSenderChat chat => (await TelegramOperations.AwaitReadAsync(
+                    tg.Client.GetChatAsync(chat.ChatId), cancellationToken, retainNativeOperation: true)).Title,
+                _ => null
             };
         }
-        catch
+        catch (TdException ex) when (ex.Error.Code is 400 or 403 or 404)
         {
-            return string.Empty;
+            return null;
         }
     }
 
@@ -487,56 +457,15 @@ internal static class Output
         return values.FirstOrDefault(x => !string.IsNullOrWhiteSpace(x)) ?? string.Empty;
     }
 
-    private static string Clean(string? value)
-    {
-        return (value ?? string.Empty)
-            .Replace('\t', ' ')
-            .Replace('\r', ' ')
-            .Replace('\n', ' ')
-            .Trim();
-    }
+    internal static string Clean(string? value) => (value ?? string.Empty)
+        .Replace("\\", "\\\\", StringComparison.Ordinal)
+        .Replace("\t", "\\t", StringComparison.Ordinal)
+        .Replace("\r", "\\r", StringComparison.Ordinal)
+        .Replace("\n", "\\n", StringComparison.Ordinal);
 
     private static string EscapeMd(string value)
     {
         return value.Replace("\\", "\\\\").Replace("`", "\\`");
-    }
-
-    internal static object ToJsonRow(MessageRow row, bool includeLinks)
-    {
-        return includeLinks
-            ? new
-            {
-                chat_id = row.ChatId,
-                message_id = row.MessageId,
-                date = row.Date,
-                sender = row.Sender,
-                sender_name = row.SenderName,
-                kind = row.Kind,
-                file_id = row.FileId,
-                text = row.Text,
-                reply_to_message_id = row.ReplyToMessageId,
-                tg_url = row.TgUrl,
-                https_url = row.HttpsUrl,
-                https_fallback = row.HttpsFallback,
-                query = row.Query,
-                original_chat_id = row.OriginalChatId,
-                original_message_id = row.OriginalMessageId
-            }
-            : new
-            {
-                chat_id = row.ChatId,
-                message_id = row.MessageId,
-                date = row.Date,
-                sender = row.Sender,
-                sender_name = row.SenderName,
-                kind = row.Kind,
-                file_id = row.FileId,
-                text = row.Text,
-                reply_to_message_id = row.ReplyToMessageId,
-                query = row.Query,
-                original_chat_id = row.OriginalChatId,
-                original_message_id = row.OriginalMessageId
-            };
     }
 
     private static string FormatOptionalMdLink(string label, string? url)

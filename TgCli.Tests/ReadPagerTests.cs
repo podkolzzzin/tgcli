@@ -359,12 +359,13 @@ public sealed class ReadPagerTests
     }
 
     [Fact]
-    public void DatesUseUtcForDateOnlyAndZoneLessInputs()
+    public void DatesUseUtcAndRejectTimestampsWithoutAZone()
     {
         var (since, until) = ReadBounds.ParseDates("2026-01-01T01:00:00+01:00", "2026-01-01");
         Assert.Equal(new DateTimeOffset(2026, 1, 1, 0, 0, 0, TimeSpan.Zero), since);
         Assert.Equal(new DateTimeOffset(2026, 1, 2, 0, 0, 0, TimeSpan.Zero).AddTicks(-1), until);
-        Assert.Equal(TimeSpan.Zero, ReadBounds.ParseDates("2026-01-01T01:00:00", null).Since!.Value.Offset);
+        Assert.Equal(TimeSpan.Zero, ReadBounds.ParseDates("2026-01-01T01:00:00Z", null).Since!.Value.Offset);
+        Assert.Throws<ArgumentException>(() => ReadBounds.ParseDates("2026-01-01T01:00:00", null));
         Assert.Throws<ArgumentException>(() => ReadBounds.ParseDates("2026-01-02", "2026-01-01"));
     }
 

@@ -12,9 +12,9 @@ internal sealed record ExportRequest
     private static readonly HashSet<string> FieldNames = new(StringComparer.Ordinal)
     {
         "schema", "schema_version", "chat_id", "message_id", "short_message_id", "tg_url",
-        "source_chat_id", "date", "edit_date", "sender_type", "sender_user_id", "sender_chat_id",
+        "source_chat_id", "original_chat_id", "original_message_id", "query", "date", "edit_date", "sender_type", "sender_user_id", "sender_chat_id",
         "sender_display_name", "sender_username", "kind", "text", "entities", "reply_to_chat_id",
-        "reply_to_message_id", "reply_target", "forward_origin", "interaction_info", "view_count",
+        "reply_to_message_id", "reply_target", "forward_origin", "interaction_info", "interaction_info_available", "view_count",
         "forward_count", "reply_count", "reaction_counts", "paid_reaction_count", "has_comments",
         "poll", "service_event", "attachments", "is_deleted", "tombstone", "links"
     };
@@ -27,6 +27,7 @@ internal sealed record ExportRequest
     public string? Path { get; private init; }
     public OutputFormat Format { get; private init; }
     public bool All { get; private init; }
+    public int Limit { get; private init; }
     public bool Local { get; private init; }
     public bool IncludeLinks { get; private init; }
     public bool Incremental { get; private init; }
@@ -49,8 +50,11 @@ internal sealed record ExportRequest
         int maxPages = 1000, bool includeLinks = false, bool resume = false, bool incremental = false,
         long sinceMessageId = 0, string? sinceDate = null, string? resumeToken = null, string? fields = null,
         bool transcribe = false, string transcribeLanguage = "auto", string? transcribeCommand = null,
-        string? expectSince = null, int expectCountMin = 0, bool failIncomplete = false)
+        string? expectSince = null, int expectCountMin = 0, bool failIncomplete = false, int limit = 0,
+        IReadOnlyList<string>? transcribeCommandArguments = null)
     {
+        if (limit is < 0 or > 100) throw new ArgumentException("Export limit must be from 0 to 100.", nameof(limit));
+        all &= limit == 0;
         if (chatId == 0) throw new ArgumentException("Chat ID must be nonzero.", nameof(chatId));
         if (sinceMessageId < 0) throw new ArgumentException("--since-message-id must be a positive message ID.");
         if (maxPages <= 0) throw new ArgumentException("--max-pages must be positive.");
@@ -79,21 +83,22 @@ internal sealed record ExportRequest
         // A projected JSONL file can remain resumable when its keys and terminal state are retained.
         if (hasRowIdentity && names is not null) names.Add("is_deleted");
         var normalizedFields = names is null ? null : string.Join(',', names.Order(StringComparer.Ordinal));
-        var since = ParseDate(sinceDate, "--since-date");
-        var expected = ParseDate(expectSince, "--expect-since");
+        var (since, _) = ReadBounds.ParseDates(sinceDate, null);
+        var (expected, _) = ReadBounds.ParseDates(expectSince, null);
         var scope = new JObject
         {
             ["chat_id"] = FormatId(chatId),
             ["schema"] = ExportSchema.Name,
             ["schema_version"] = ExportSchema.Version,
             ["format"] = parsedFormat.ToString().ToLowerInvariant(),
-            ["follow_migrations"] = all,
+            ["follow_migrations"] = all && !local,
+            ["limit"] = limit,
             ["since_message_id"] = sinceMessageId == 0 ? JValue.CreateNull() : FormatId(sinceMessageId),
             ["since_date"] = since is null ? JValue.CreateNull() : since.Value.ToString("O", CultureInfo.InvariantCulture),
             ["fields"] = normalizedFields is null ? JValue.CreateNull() : normalizedFields,
             ["include_links"] = includeLinks,
             ["transcription"] = !string.IsNullOrWhiteSpace(transcribeCommand)
-                ? "external:" + Hash(transcribeCommand)
+                ? "external:" + Hash(new JArray(transcribeCommand, new JArray(transcribeCommandArguments ?? [])).ToString(Formatting.None))
                 : transcribe ? "built-in:" + transcribeLanguage.Trim().ToLowerInvariant() : "disabled"
         };
         var checkpoint = resumeToken is null ? null : ParseCheckpoint(resumeToken, scope, chatId);
@@ -103,6 +108,7 @@ internal sealed record ExportRequest
             Path = path,
             Format = parsedFormat,
             All = all,
+            Limit = limit,
             Local = local,
             IncludeLinks = includeLinks,
             Incremental = incremental,
@@ -213,15 +219,6 @@ internal sealed record ExportRequest
         if (unknown.Length > 0) throw new ArgumentException($"Unknown export field(s): {string.Join(", ", unknown)}.");
         names.UnionWith(["schema", "schema_version"]);
         return names;
-    }
-
-    private static DateTimeOffset? ParseDate(string? value, string option)
-    {
-        if (value is null) return null;
-        if (!DateTimeOffset.TryParse(value, CultureInfo.InvariantCulture,
-            DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out var parsed))
-            throw new ArgumentException($"{option} requires a date or timestamp.");
-        return parsed;
     }
 
     internal static string FormatId(long value) => value.ToString(CultureInfo.InvariantCulture);

@@ -370,16 +370,18 @@ internal static class ReadBounds
 
     private static DateTimeOffset? ParseDate(string? value, bool endOfDay)
     {
-        if (string.IsNullOrWhiteSpace(value)) return null;
-        if (DateOnly.TryParseExact(value.Trim(), "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.None, out var day))
+        if (value is null) return null;
+        var input = value.Trim();
+        if (DateOnly.TryParseExact(input, "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.None, out var day))
         {
             var time = endOfDay ? TimeOnly.MaxValue : TimeOnly.MinValue;
             return new DateTimeOffset(day.ToDateTime(time), TimeSpan.Zero);
         }
+        var hasTimezone = input.EndsWith('Z') || input.Length >= 6 && input[^6] is '+' or '-' && input[^3] == ':';
         string[] formats = ["yyyy-MM-dd'T'HH:mmK", "yyyy-MM-dd'T'HH:mm:ssK", "yyyy-MM-dd'T'HH:mm:ss.FFFFFFFK"];
-        if (DateTimeOffset.TryParseExact(value.Trim(), formats, CultureInfo.InvariantCulture,
-            DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out var timestamp))
+        if (hasTimezone && DateTimeOffset.TryParseExact(input, formats, CultureInfo.InvariantCulture,
+            DateTimeStyles.AdjustToUniversal, out var timestamp))
             return timestamp;
-        throw new ArgumentException($"Invalid date '{value}'. Use YYYY-MM-DD or an ISO 8601 timestamp.");
+        throw new ArgumentException("Use YYYY-MM-DD or an ISO 8601 timestamp with an explicit timezone.");
     }
 }

@@ -3,7 +3,6 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
-using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using TdLib;
@@ -307,26 +306,6 @@ public sealed class ExportTests
 
         Assert.False(result.Complete);
         Assert.Equal("max_pages_reached", result.TerminationReason);
-    }
-
-    [Fact]
-    public void LightweightJsonRowsUseSnakeCaseNames()
-    {
-        var chatJson = JsonSerializer.Serialize(new ChatRow(1, "title", "private", "user", 0, "last"));
-        var messageJson = JsonSerializer.Serialize(new MessageRow(1, 2, "date", "sender", "name", "text", 3, "body", 4));
-        var exportedMessageJson = JsonSerializer.Serialize(Output.ToJsonRow(new MessageRow(1, 2, "date", "sender", "name", "text", 3, "body", 4), includeLinks: false));
-
-        Assert.Contains("\"chat_id\":1", chatJson);
-        Assert.Contains("\"last_message\":\"last\"", chatJson);
-        Assert.DoesNotContain("ChatId", chatJson);
-
-        Assert.Contains("\"message_id\":2", messageJson);
-        Assert.Contains("\"reply_to_message_id\":4", messageJson);
-        Assert.DoesNotContain("MessageId", messageJson);
-
-        Assert.Contains("\"chat_id\":1", exportedMessageJson);
-        Assert.Contains("\"message_id\":2", exportedMessageJson);
-        Assert.DoesNotContain("ChatId", exportedMessageJson);
     }
 
     [Fact]
