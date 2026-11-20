@@ -1,5 +1,6 @@
 using System.Reflection;
 using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 
 namespace TgCli;
@@ -40,11 +41,34 @@ internal sealed class EmbeddedTranscriptionAssets
 
     internal static void ExtractVerified(Stream source, string destination, string expectedHash)
     {
+        destination = Path.GetFullPath(destination);
+        var lockPath = OperatingSystem.IsWindows() ? destination.ToUpperInvariant() : destination;
+        var lockName = "tgcli-transcription-" + Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(lockPath)));
+        using var mutex = new Mutex(lockName, new NamedWaitHandleOptions { CurrentUserOnly = true, CurrentSessionOnly = false });
+        try
+        {
+            if (!mutex.WaitOne(TimeSpan.FromSeconds(30)))
+                throw new TimeoutException($"Timed out waiting to extract transcription asset '{destination}'.");
+        }
+        catch (AbandonedMutexException)
+        {
+            // Ownership transferred to this thread. Verify the destination before using it.
+        }
+
+        try
+        {
+            // On Windows, an open verifier can block replacement even when it shares delete access.
+            VerifyOrExtract(source, destination, expectedHash);
+        }
+        finally { mutex.ReleaseMutex(); }
+    }
+
+    private static void VerifyOrExtract(Stream source, string destination, string expectedHash)
+    {
         if (File.Exists(destination))
         {
             try
             {
-                // A verifier in another process can continue to read its opened file across atomic replacement.
                 using var existing = new FileStream(destination, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete);
                 if (Convert.ToHexString(SHA256.HashData(existing)).Equals(expectedHash, StringComparison.OrdinalIgnoreCase))
                     return;
