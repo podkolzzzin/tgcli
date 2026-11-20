@@ -46,6 +46,28 @@ public sealed class SessionStorageTests : IDisposable
     }
 
     [Fact]
+    public void ArchiveChecksumMismatchPreservesExistingSession()
+    {
+        var sentinel = CreateSentinel();
+        var originalContent = Encoding.UTF8.GetBytes("synthetic authorization bytes for the checksum fixture");
+        var secret = CreateSecret(ValidConfig, archive =>
+        {
+            using var entry = archive.CreateEntry("tdlib-db/td.binlog", CompressionLevel.NoCompression).Open();
+            entry.Write(originalContent);
+        });
+        var corruptPayload = Convert.FromBase64String(secret);
+        var offset = corruptPayload.AsSpan().IndexOf(originalContent);
+        Assert.True(offset >= 0, "The fixture must contain the verbatim stored entry.");
+        corruptPayload[offset] ^= 1;
+
+        var error = Assert.Throws<ValidationException>(() =>
+            SessionSecret.Import(Convert.ToBase64String(corruptPayload), _root, force: true));
+        Assert.Contains("checksum", error.Message);
+        Assert.Equal("previous", File.ReadAllText(sentinel));
+        Assert.False(File.Exists(Path.Combine(_root, "tdlib.lock")));
+    }
+
+    [Fact]
     public void DuplicateArchiveEntryPreservesExistingSession()
     {
         var sentinel = CreateSentinel();

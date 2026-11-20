@@ -89,6 +89,7 @@ internal static class SessionSecret
     private const int FormatVersion = 1;
     private const string TransactionName = ".tgcli-session-import";
     private const string RetiredPrefix = ".tgcli-session-import-retired-";
+    private static readonly uint[] ZipCrc32Table = CreateZipCrc32Table();
 
     public static string Export(string? sessionDirectory)
     {
@@ -264,7 +265,28 @@ internal static class SessionSecret
     private static byte[] ReadEntry(ZipArchiveEntry entry)
     {
         using var stream = entry.Open();
-        return ReadExact(stream, checked((int)entry.Length));
+        var bytes = ReadExact(stream, checked((int)entry.Length));
+        // ZipArchive does not verify the checksum when reading an entry.
+        var crc = uint.MaxValue;
+        foreach (var value in bytes)
+            crc = ZipCrc32Table[(byte)(crc ^ value)] ^ (crc >> 8);
+        if (~crc != entry.Crc32)
+            throw new ValidationException($"Session secret entry {entry.FullName} has an invalid checksum.");
+        return bytes;
+    }
+
+    private static uint[] CreateZipCrc32Table()
+    {
+        const uint polynomial = 0xedb88320; // Reflected IEEE CRC-32, as used by ZIP.
+        var table = new uint[256];
+        for (var index = 0; index < table.Length; index++)
+        {
+            var crc = (uint)index;
+            for (var bit = 0; bit < 8; bit++)
+                crc = (crc & 1) == 0 ? crc >> 1 : (crc >> 1) ^ polynomial;
+            table[index] = crc;
+        }
+        return table;
     }
 
     private static byte[] ReadExact(Stream stream, int size)
