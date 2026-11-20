@@ -7,6 +7,7 @@ internal static class CliExecution
     private static readonly AsyncLocal<Invocation?> Current = new();
 
     internal static CancellationToken CancellationToken => Current.Value?.Token ?? CancellationToken.None;
+    internal static CliDiagnosticOutput? Diagnostics => Current.Value?.Diagnostics;
 
     internal static TimeSpan Remaining
     {
@@ -21,23 +22,34 @@ internal static class CliExecution
         }
     }
 
-    internal static Task<Exception?> RunAsync(Func<CancellationToken, Task> command, TimeSpan budget,
-        CancellationToken cancellationToken)
+    internal static async Task<Exception?> RunAsync(Func<CancellationToken, Task> command, TimeSpan budget,
+        CancellationToken cancellationToken, CliDiagnosticOutput? diagnostics = null)
     {
         var started = Stopwatch.GetTimestamp();
-        return OperationDeadline.RunAsync(token => Task.Run(async () =>
+        Exception? failure;
+        try
         {
-            var previous = Current.Value;
-            var invocation = new Invocation(token, budget, started);
-            Current.Value = invocation;
-            try
+            failure = await OperationDeadline.RunAsync(token => Task.Run(async () =>
             {
-                token.ThrowIfCancellationRequested();
-                await command(token);
-                return invocation.Failure;
-            }
-            finally { Current.Value = previous; }
-        }, CancellationToken.None), budget, cancellationToken, "Command");
+                var previous = Current.Value;
+                var invocation = new Invocation(token, budget, started, diagnostics);
+                Current.Value = invocation;
+                try
+                {
+                    token.ThrowIfCancellationRequested();
+                    await command(token);
+                    return invocation.Failure;
+                }
+                finally { Current.Value = previous; }
+            }, CancellationToken.None), budget, cancellationToken, "Command");
+        }
+        catch (TimeoutException) when (diagnostics is not null)
+        {
+            diagnostics.WriteDeadline(Stopwatch.GetElapsedTime(started));
+            throw;
+        }
+        diagnostics?.WriteResult();
+        return failure;
     }
 
     internal static void RecordFailure(Exception error)
@@ -46,11 +58,12 @@ internal static class CliExecution
         Interlocked.CompareExchange(ref invocation.Failure, error, null);
     }
 
-    private sealed class Invocation(CancellationToken token, TimeSpan budget, long started)
+    private sealed class Invocation(CancellationToken token, TimeSpan budget, long started, CliDiagnosticOutput? diagnostics)
     {
         internal CancellationToken Token { get; } = token;
         internal TimeSpan Budget { get; } = budget;
         internal long Started { get; } = started;
+        internal CliDiagnosticOutput? Diagnostics { get; } = diagnostics;
         internal Exception? Failure;
     }
 }

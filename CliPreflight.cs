@@ -97,7 +97,10 @@ internal sealed class CliPreflight(params (Type Type, string Prefix)[] registrat
         }
 
         CliInputRules.Validate(command.Name, values);
-        return new([..normalized], command.Name == "mcp" ? Timeout.InfiniteTimeSpan : TimeSpan.FromSeconds(timeout), false);
+        var diagnosticRoot = command.Name == "diagnostics"
+            ? TelegramSession.ResolveSessionDirectory(values.GetValueOrDefault("--session"))
+            : null;
+        return new([..normalized], command.Name == "mcp" ? Timeout.InfiniteTimeSpan : TimeSpan.FromSeconds(timeout), false, diagnosticRoot);
 
         void AddTimeout(string value)
         {
@@ -200,4 +203,4 @@ internal sealed class CliPreflight(params (Type Type, string Prefix)[] registrat
     }
 }
 
-internal sealed record CliInvocation(string[] Arguments, TimeSpan Budget, bool ShowGlobalTimeoutHelp);
+internal sealed record CliInvocation(string[] Arguments, TimeSpan Budget, bool ShowGlobalTimeoutHelp, string? DiagnosticRoot = null);

@@ -1,6 +1,7 @@
 using System;
 using System.Threading;
 using System.IO;
+using Newtonsoft.Json.Linq;
 using System.Threading.Tasks;
 using TgCli;
 using Xunit;
@@ -33,6 +34,84 @@ public sealed class CliExecutionTests
         Assert.Empty(output.ToString());
         Assert.False(CliExecution.CancellationToken.CanBeCanceled);
         Assert.Equal(Timeout.InfiniteTimeSpan, CliExecution.Remaining);
+    }
+
+    [Fact]
+    public async Task Diagnostic_deadline_writes_observed_lock_once_even_if_handler_returns_late()
+    {
+        var testToken = TestContext.Current.CancellationToken;
+        var root = Directory.CreateTempSubdirectory("tgcli-diagnostic-deadline-");
+        try
+        {
+            using var lease = SessionLock.Acquire(root.FullName);
+            using var output = new StringWriter();
+            using var guardedOutput = new CliOutputWriter(output);
+            var diagnostics = new CliDiagnosticOutput(root.FullName, guardedOutput);
+            var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var drained = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var command = CliExecution.RunAsync(async _ =>
+            {
+                CliExecution.Diagnostics!.Observe(SessionDiagnostic.ObserveStorage(root.FullName));
+                started.SetResult();
+                await release.Task;
+                CliExecution.Diagnostics.Complete(new JObject { ["healthy"] = true });
+                drained.SetResult();
+            }, TimeSpan.FromSeconds(1), testToken, diagnostics);
+
+            string published;
+            try
+            {
+                await started.Task.WaitAsync(TimeSpan.FromSeconds(5), testToken);
+                var error = await Assert.ThrowsAsync<TimeoutException>(() => command);
+                Assert.Equal(5, CliFailure.FromException(error).ExitCode);
+                published = output.ToString();
+                var result = JObject.Parse(Assert.Single(published.Split('\n', StringSplitOptions.RemoveEmptyEntries)));
+                Assert.False(result.Value<bool>("healthy"));
+                Assert.Equal("request_timeout", result.Value<string>("error_code"));
+                Assert.True(result.Value<double>("latency_ms") > 0);
+                Assert.True(result["lock_status"]!.Value<bool>("locked"));
+                Assert.False(result.Value<bool>("database_exists"));
+                Assert.Equal(JTokenType.Null, result["authorized"]!.Type);
+            }
+            finally { release.TrySetResult(); }
+            await drained.Task.WaitAsync(TimeSpan.FromSeconds(5), testToken);
+            Assert.Equal(published, output.ToString());
+        }
+        finally { root.Delete(recursive: true); }
+    }
+
+    [Fact]
+    public async Task Diagnostic_deadline_before_dispatch_does_not_invent_lock_or_database_evidence()
+    {
+        using var output = new StringWriter();
+        var root = Path.GetFullPath("synthetic-unobserved-session");
+        var diagnostics = new CliDiagnosticOutput(root, output);
+        var error = await Assert.ThrowsAsync<TimeoutException>(() => CliExecution.RunAsync(
+            _ => throw new InvalidOperationException("The expired command must never dispatch."),
+            TimeSpan.Zero, TestContext.Current.CancellationToken, diagnostics));
+
+        Assert.Equal(5, CliFailure.FromException(error).ExitCode);
+        var result = JObject.Parse(output.ToString());
+        Assert.Equal(root, result.Value<string>("session_directory"));
+        Assert.Equal("request_timeout", result.Value<string>("error_code"));
+        Assert.Equal(JTokenType.Null, result["lock_status"]!.Type);
+        Assert.Equal(JTokenType.Null, result["database_exists"]!.Type);
+    }
+
+    [Fact]
+    public async Task Diagnostic_interrupt_does_not_publish_a_timeout_record()
+    {
+        using var output = new StringWriter();
+        using var interrupt = new CancellationTokenSource();
+        interrupt.Cancel();
+        var diagnostics = new CliDiagnosticOutput(Path.GetFullPath("synthetic-canceled-session"), output);
+        var error = await Assert.ThrowsAnyAsync<OperationCanceledException>(() => CliExecution.RunAsync(
+            _ => throw new InvalidOperationException("The interrupted command must never dispatch."),
+            TimeSpan.FromSeconds(5), interrupt.Token, diagnostics));
+
+        Assert.Equal(130, CliFailure.FromException(error).ExitCode);
+        Assert.Empty(output.ToString());
     }
 
     [Fact]

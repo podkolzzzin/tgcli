@@ -40,13 +40,15 @@ internal static class Program
             Console.SetOut(CliOutputWriter.Open());
             NativeTdLibBootstrap.Configure();
 
+            var diagnostics = invocation.DiagnosticRoot is { } diagnosticRoot
+                ? new CliDiagnosticOutput(diagnosticRoot, Console.Out) : null;
             var failure = await CliExecution.RunAsync(async token =>
             {
                 await app.RunAsync(invocation.Arguments, token);
                 token.ThrowIfCancellationRequested();
                 if (invocation.ShowGlobalTimeoutHelp)
                     Console.WriteLine("  --request-timeout <seconds>    Total command deadline, 1–3600 (default: 60). Excludes the MCP server.");
-            }, invocation.Budget, canceled.Token);
+            }, invocation.Budget, canceled.Token, diagnostics);
             return failure is null ? Environment.ExitCode : ReportFailure(failure);
         }
         catch (Exception error)

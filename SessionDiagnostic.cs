@@ -5,11 +5,12 @@ using TdLib;
 namespace TgCli;
 
 internal sealed record SessionDiagnosticResult(JObject Data, bool Healthy, Exception? Error);
+internal sealed record SessionDiagnosticObservation(string Root, bool? SessionDirectoryExists, bool? DatabaseExists, SessionLockStatus? LockStatus);
 
 internal static class SessionDiagnostic
 {
     internal static async Task<SessionDiagnosticResult> ProbeAsync(string? sessionDirectory, int lockTimeout, bool noWait,
-        CancellationToken cancellationToken, TimeSpan? timeout = null)
+        CancellationToken cancellationToken, Action<SessionDiagnosticObservation>? observe = null)
     {
         var root = TelegramSession.ResolveSessionDirectory(sessionDirectory);
         var timer = Stopwatch.StartNew();
@@ -17,18 +18,18 @@ internal static class SessionDiagnostic
         SessionDiagnosticResult result;
         try
         {
-            if (!Directory.Exists(root)) throw LoginRequired();
-            var initialLock = SessionLock.Inspect(root);
-            if (initialLock.locked && (noWait || lockTimeout == 0))
+            var observation = ObserveStorage(root);
+            observe?.Invoke(observation);
+            if (observation.SessionDirectoryExists == false) throw LoginRequired();
+            if (observation.LockStatus?.locked == true && (noWait || lockTimeout == 0))
                 throw new IOException("The TDLib session is locked by another process.");
 
-            result = await OperationDeadline.RunAsync(async token =>
-            {
-                await using var session = await TelegramSession.CreateAsync(root, apiId: 0, apiHash: null,
-                    saveConfig: false, lockTimeout, noWait, cancellationToken: token);
-                await ObserveStartupAsync(session, token);
-                return await InspectAsync(session, token, initialLock);
-            }, timeout ?? TimeSpan.FromSeconds(60), cancellationToken, "Session diagnostics");
+            await using var session = await TelegramSession.CreateAsync(root, apiId: 0, apiHash: null,
+                saveConfig: false, lockTimeout, noWait, cancellationToken);
+            observation = observation with { DatabaseExists = Directory.Exists(session.DatabaseDirectory) };
+            observe?.Invoke(observation);
+            await ObserveStartupAsync(session, cancellationToken);
+            result = await InspectAsync(session, cancellationToken, observation);
         }
         catch (Exception error) when (error is not OperationCanceledException)
         {
@@ -50,13 +51,13 @@ internal static class SessionDiagnostic
     }
 
     internal static Task<SessionDiagnosticResult> InspectAsync(TelegramSession session, CancellationToken cancellationToken) =>
-        InspectAsync(session, cancellationToken, TryInspectLock(session.SessionDirectory));
+        InspectAsync(session, cancellationToken, ObserveStorage(session.SessionDirectory));
 
     private static async Task<SessionDiagnosticResult> InspectAsync(TelegramSession session,
-        CancellationToken cancellationToken, SessionLockStatus? lockStatus)
+        CancellationToken cancellationToken, SessionDiagnosticObservation observation)
     {
         var timer = Stopwatch.StartNew();
-        var data = DescribeStorage(session.SessionDirectory, lockStatus);
+        var data = DescribeStorage(observation);
         Exception? failure = null;
         try
         {
@@ -112,15 +113,24 @@ internal static class SessionDiagnostic
     internal static SessionDiagnosticResult Failure(string? sessionDirectory, Exception error)
     {
         var root = TelegramSession.ResolveSessionDirectory(sessionDirectory);
-        var lockStatus = TryInspectLock(root);
-        var data = DescribeStorage(root, lockStatus);
-        return Unhealthy(data, error, lockStatus?.locked == true && error is IOException ? "session_locked" : null);
+        var observation = ObserveStorage(root);
+        var data = DescribeStorage(observation);
+        return Unhealthy(data, error, observation.LockStatus?.locked == true && error is IOException ? "session_locked" : null);
     }
 
-    private static JObject DescribeStorage(string root, SessionLockStatus? lockStatus)
+    internal static SessionDiagnosticObservation ObserveStorage(string root) =>
+        new(root, Directory.Exists(root), Directory.Exists(Path.Combine(root, "tdlib-db")), TryInspectLock(root));
+
+    internal static JObject Deadline(SessionDiagnosticObservation observation, TimeSpan elapsed)
     {
-        var database = Path.Combine(root, "tdlib-db");
-        var exists = Directory.Exists(database);
+        var result = Unhealthy(DescribeStorage(observation), new TimeoutException());
+        result.Data["latency_ms"] = elapsed.TotalMilliseconds;
+        return result.Data;
+    }
+
+    private static JObject DescribeStorage(SessionDiagnosticObservation observation)
+    {
+        var database = Path.Combine(observation.Root, "tdlib-db");
         return new JObject
         {
             ["healthy"] = false,
@@ -130,13 +140,13 @@ internal static class SessionDiagnostic
             ["authorization_state"] = "Unknown",
             ["connection_state"] = "Unknown",
             ["network_available"] = JValue.CreateNull(),
-            ["session_directory"] = root,
+            ["session_directory"] = observation.Root,
             ["database_directory"] = database,
-            ["database_exists"] = exists,
-            ["database_size_bytes"] = exists ? JValue.CreateNull() : new JValue(0),
+            ["database_exists"] = observation.DatabaseExists,
+            ["database_size_bytes"] = observation.DatabaseExists == false ? new JValue(0) : JValue.CreateNull(),
             ["tdlib_version"] = JValue.CreateNull(),
             ["authenticated_account"] = JValue.CreateNull(),
-            ["lock_status"] = lockStatus is null ? JValue.CreateNull() : JObject.FromObject(lockStatus),
+            ["lock_status"] = observation.LockStatus is { } lockStatus ? JObject.FromObject(lockStatus) : JValue.CreateNull(),
             ["error_code"] = JValue.CreateNull(),
             ["diagnostic_message"] = JValue.CreateNull()
         };

@@ -34,12 +34,12 @@ public sealed class TgCommands
         if (lockTimeout < 0) throw new ArgumentException("Lock timeout must be zero or greater.", nameof(lockTimeout));
 
         var cancellationToken = CliExecution.CancellationToken;
-        var remaining = CliExecution.Remaining;
-        TimeSpan? probeBudget = remaining == Timeout.InfiniteTimeSpan ? null :
-            TimeSpan.FromMilliseconds(Math.Max(0, remaining.TotalMilliseconds - Math.Min(650, remaining.TotalMilliseconds / 2)));
-        var result = await SessionDiagnostic.ProbeAsync(session, lockTimeout, noWait, cancellationToken, probeBudget);
+        var diagnostics = CliExecution.Diagnostics;
+        var result = await SessionDiagnostic.ProbeAsync(session, lockTimeout, noWait, cancellationToken,
+            diagnostics is null ? null : diagnostics.Observe);
         cancellationToken.ThrowIfCancellationRequested();
-        Console.WriteLine(result.Data.ToString(Formatting.None));
+        if (diagnostics is null) Console.WriteLine(result.Data.ToString(Formatting.None));
+        else diagnostics.Complete(result.Data);
         if (result.Error is not null) throw result.Error;
     }
 

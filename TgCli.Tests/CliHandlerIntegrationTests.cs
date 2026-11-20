@@ -41,17 +41,32 @@ public sealed class CliHandlerIntegrationTests : IDisposable
         Assert.Equal("request_timeout", result.Value<string>("error_code"));
     }
 
-    [Fact]
-    public async Task EmptyProfileDiagnosticsPrintsLoginRequiredEvidence()
+    [Theory]
+    [InlineData("json")]
+    [InlineData("jsonl")]
+    [InlineData("plain")]
+    public async Task EmptyProfileDiagnosticsPrintsOneLoginRequiredRecord(string format)
     {
         Directory.CreateDirectory(_root);
-        var (exitCode, stdout, _) = await InvokeAsync("diagnostics");
+        var (exitCode, stdout, _) = await InvokeAsync("diagnostics", "--format", format);
         Assert.Equal(4, exitCode);
-        var result = JObject.Parse(stdout);
+        var result = JObject.Parse(Assert.Single(stdout.Split('\n', StringSplitOptions.RemoveEmptyEntries)));
         Assert.False(result.Value<bool>("healthy"));
         Assert.False(result["lock_status"]!.Value<bool>("locked"));
         Assert.False(result.Value<bool>("database_exists"));
         Assert.Equal("login_required", result.Value<string>("error_code"));
+    }
+
+    [Fact]
+    public async Task DiagnosticHelpPrintsOnlyHelpAndLeavesSessionPathUntouched()
+    {
+        Directory.CreateDirectory(_root);
+        var (exitCode, stdout, stderr) = await InvokeAsync("diagnostics", "--help");
+        Assert.Equal(0, exitCode);
+        Assert.Contains("--lock-timeout", stdout);
+        Assert.DoesNotContain("\"healthy\"", stdout);
+        Assert.Empty(stderr);
+        Assert.False(Directory.Exists(SessionPath));
     }
 
     [Fact]
