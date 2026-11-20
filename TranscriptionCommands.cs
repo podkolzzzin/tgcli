@@ -5,9 +5,9 @@ namespace TgCli;
 
 internal static class TranscriptionCommands
 {
-    public static MediaTranscription? Create(bool enabled, string language, string? command = null)
+    public static MediaTranscription? Create(bool enabled, string language, string? command = null, IReadOnlyList<string>? commandArguments = null)
     {
-        var options = TranscriptionOptions.Create(enabled, language, command);
+        var options = TranscriptionOptions.Create(enabled, language, command, commandArguments);
         return options is null ? null : new(options, () => new WhisperMediaTranscriber());
     }
 

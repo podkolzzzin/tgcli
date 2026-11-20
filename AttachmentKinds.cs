@@ -13,7 +13,8 @@ internal enum AttachmentKind
     Photo,
     Animation,
     VideoNote,
-    File
+    File,
+    Thumbnail
 }
 
 internal static class AttachmentKinds
@@ -31,6 +32,7 @@ internal static class AttachmentKinds
             "animation" or "gif" => AttachmentKind.Animation,
             "video-note" or "videonote" or "round" => AttachmentKind.VideoNote,
             "file" => AttachmentKind.File,
+            "thumbnail" => AttachmentKind.Thumbnail,
             _ => throw new ValidationException($"Unsupported attachment type '{value}'.")
         };
     }
@@ -47,8 +49,21 @@ internal static class AttachmentKinds
             AttachmentKind.Animation => new TdApi.SearchMessagesFilter.SearchMessagesFilterAnimation(),
             AttachmentKind.VideoNote => new TdApi.SearchMessagesFilter.SearchMessagesFilterVideoNote(),
             AttachmentKind.All or AttachmentKind.File => new TdApi.SearchMessagesFilter.SearchMessagesFilterEmpty(),
+            AttachmentKind.Thumbnail => throw new ValidationException("Thumbnails can be selected by attachment identifier, but Telegram does not search for thumbnails."),
             _ => new TdApi.SearchMessagesFilter.SearchMessagesFilterEmpty()
         };
+    }
+
+    public static string CanonicalName(AttachmentKind kind) => kind switch
+    {
+        AttachmentKind.VideoNote => "video-note",
+        _ => kind.ToString().ToLowerInvariant()
+    };
+
+    public static bool Matches(string? requestedType, string kind)
+    {
+        var requested = Parse(requestedType ?? "file");
+        return requested is AttachmentKind.All or AttachmentKind.File || CanonicalName(requested) == kind;
     }
 
     public static TdApi.FileType ToFileType(AttachmentKind kind)
@@ -62,6 +77,7 @@ internal static class AttachmentKinds
             AttachmentKind.Photo => new TdApi.FileType.FileTypePhoto(),
             AttachmentKind.Animation => new TdApi.FileType.FileTypeAnimation(),
             AttachmentKind.VideoNote => new TdApi.FileType.FileTypeVideoNote(),
+            AttachmentKind.Thumbnail => new TdApi.FileType.FileTypeThumbnail(),
             AttachmentKind.All or AttachmentKind.File => new TdApi.FileType.FileTypeUnknown(),
             _ => new TdApi.FileType.FileTypeUnknown()
         };

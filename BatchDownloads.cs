@@ -1,4 +1,5 @@
 using System.ComponentModel.DataAnnotations;
+using System.Globalization;
 using Newtonsoft.Json.Linq;
 using TdLib;
 
@@ -56,8 +57,7 @@ internal static class BatchDownloads
             }
             else
             {
-                AttachmentKinds.Parse(type);
-                type = type.Trim();
+                type = AttachmentKinds.CanonicalName(AttachmentKinds.Parse(type));
             }
 
             requests.Add(new BatchDownloadRequest(requests.Count, chatId, messageId, type));
@@ -69,12 +69,12 @@ internal static class BatchDownloads
         }
 
         var duplicate = requests
-            .GroupBy(x => (x.ChatId, x.MessageId, Type: x.Type?.ToLowerInvariant()))
+            .GroupBy(x => (x.ChatId, x.MessageId))
             .FirstOrDefault(x => x.Count() > 1);
         if (duplicate is not null)
         {
             throw new ValidationException(
-                $"Batch input contains duplicate record {duplicate.Key.ChatId}/{duplicate.Key.MessageId} ({duplicate.Key.Type ?? "file"}).");
+                $"Batch input contains duplicate record {duplicate.Key.ChatId}/{duplicate.Key.MessageId}; use one attachment selector per message.");
         }
 
         return requests;
@@ -119,11 +119,17 @@ internal static class BatchDownloads
     private static long ReadRequiredInt64(JObject value, string property, int lineNumber)
     {
         var token = value[property];
-        if (token?.Type != JTokenType.Integer)
+        var text = token?.Type switch
         {
-            throw new ValidationException($"Batch input line {lineNumber} must contain integer {property}.");
+            JTokenType.Integer => token.ToString(Newtonsoft.Json.Formatting.None),
+            JTokenType.String => token.Value<string>(),
+            _ => null
+        };
+        if (!long.TryParse(text, NumberStyles.AllowLeadingSign, CultureInfo.InvariantCulture, out var id) || id == 0)
+        {
+            throw new ValidationException($"Batch input line {lineNumber} must contain nonzero integer {property}.");
         }
 
-        return token.Value<long>();
+        return id;
     }
 }

@@ -102,22 +102,19 @@ public sealed class TgCommands
         long chatId = 0,
         long messageId = 0,
         string output = ".",
-        string? session = null)
+        string? session = null,
+        CancellationToken cancellationToken = default)
     {
+        AttachmentDownloads.Validate(type, attachmentId, chatId, messageId);
+        _ = Path.GetFullPath(output);
+        cancellationToken.ThrowIfCancellationRequested();
         await using var tg = await TelegramSession.CreateReadyAsync(session);
-        var file = await ResolveDownloadFileAsync(tg, type, attachmentId, chatId, messageId);
-
-        file = await DownloadFileWithRefreshAsync(tg, file, type, chatId, messageId);
-
-        if (string.IsNullOrWhiteSpace(file.Local?.Path) || !File.Exists(file.Local.Path))
-        {
-            throw new InvalidOperationException($"TDLib did not provide a downloaded local path for file_id={file.Id}.");
-        }
+        var selected = await AttachmentDownloads.SelectAsync(
+            tg.Client, tg.SessionDirectory, type, attachmentId, chatId, messageId, cancellationToken);
+        var file = await DownloadFileWithRefreshAsync(tg, selected.File, type, selected.ChatId, selected.MessageId, cancellationToken);
 
         var destination = ResolveDownloadDestination(output, file);
-        Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
-        File.Copy(file.Local.Path, destination, overwrite: true);
-
+        await CopyDownloadedFileAsync(file, destination, cancellationToken);
         Console.WriteLine(destination);
     }
 
@@ -229,148 +226,36 @@ public sealed class TgCommands
         }
     }
 
+    internal static Task<TdApi.File> ResolveDownloadFileAsync(
+        TelegramSession tg, string? type, string? attachmentId, long chatId, long messageId,
+        CancellationToken cancellationToken = default) =>
+        ResolveDownloadFileAsync(tg.Client, tg.SessionDirectory, type, attachmentId, chatId, messageId, cancellationToken);
+
     internal static async Task<TdApi.File> ResolveDownloadFileAsync(
-        TelegramSession tg,
-        string? type,
-        string? attachmentId,
-        long chatId,
-        long messageId)
+        TdApi.IClient client, string sessionDirectory, string? type, string? attachmentId, long chatId, long messageId,
+        CancellationToken cancellationToken = default) =>
+        (await AttachmentDownloads.SelectAsync(client, sessionDirectory, type, attachmentId, chatId, messageId, cancellationToken)).File;
+
+    internal static Task<TdApi.File> DownloadFileWithRefreshAsync(
+        TelegramSession tg, TdApi.File file, string? type, long chatId, long messageId,
+        CancellationToken cancellationToken = default) =>
+        DownloadFileWithRefreshAsync(tg.Client, file, type, chatId, messageId, cancellationToken);
+
+    internal static Task<TdApi.File> DownloadFileWithRefreshAsync(
+        TdApi.IClient client, TdApi.File file, string? type, long chatId, long messageId,
+        CancellationToken cancellationToken = default) =>
+        AttachmentDownloads.CompleteAsync(client, file, type, chatId, messageId, cancellationToken);
+
+    internal static async Task CopyDownloadedFileAsync(TdApi.File file, string destination, CancellationToken cancellationToken = default)
     {
-        if (chatId != 0 && messageId != 0)
-        {
-            var message = await tg.Client.GetMessageAsync(chatId, messageId);
-            var attachment = MessageFiles.GetPrimaryAttachment(message.Content, type)
-                ?? throw new InvalidOperationException($"Message {chatId}/{messageId} does not contain a downloadable attachment matching type '{type ?? "file"}'.");
+        cancellationToken.ThrowIfCancellationRequested();
+        var source = AtomicDownload.GetCompletedPath(file);
+        var comparison = OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
+        if (source.Equals(Path.GetFullPath(destination), comparison))
+            return;
 
-            return attachment.File;
-        }
-
-        if (string.IsNullOrWhiteSpace(attachmentId))
-        {
-            throw new ArgumentException("Provide either --chat-id and --message-id, or --attachment-id with --type.");
-        }
-
-        var kind = AttachmentKinds.Parse(type ?? "file");
-        if (int.TryParse(attachmentId, out var fileId))
-        {
-            var cached = await AttachmentIndex.ResolveAsync(tg.SessionDirectory, fileId);
-            if (cached is not null)
-            {
-                if (!string.IsNullOrWhiteSpace(cached.remote_id))
-                {
-                    return await tg.Client.GetRemoteFileAsync(cached.remote_id, AttachmentKinds.ToFileType(kind));
-                }
-
-                var cachedMessage = await tg.Client.GetMessageAsync(cached.chat_id, cached.message_id);
-                var cachedAttachment = MessageFiles.GetPrimaryAttachment(cachedMessage.Content, type)
-                    ?? throw new InvalidOperationException($"Cached attachment {cached.chat_id}/{cached.message_id} no longer contains file id {fileId}.");
-
-                return cachedAttachment.File;
-            }
-
-            try
-            {
-                return await DownloadFileAsync(tg, new TdApi.File { Id = fileId });
-            }
-            catch (TdException)
-            {
-                var fallback = await FindFileByIdAsync(tg, fileId, kind);
-                return fallback ?? throw new InvalidOperationException($"File id {fileId} was not found in the current session. Use --chat-id/--message-id or a remote file id.");
-            }
-        }
-
-        return await tg.Client.GetRemoteFileAsync(attachmentId, AttachmentKinds.ToFileType(kind));
-    }
-
-    internal static async Task<TdApi.File> DownloadFileWithRefreshAsync(
-        TelegramSession tg,
-        TdApi.File file,
-        string? type,
-        long chatId,
-        long messageId)
-    {
-        try
-        {
-            return await DownloadFileAsync(tg, file);
-        }
-        catch (TdException) when (chatId != 0 && messageId != 0)
-        {
-            var refreshedMessage = await tg.Client.GetMessageAsync(chatId, messageId);
-            var refreshedAttachment = MessageFiles.GetPrimaryAttachment(refreshedMessage.Content, type)
-                ?? throw new InvalidOperationException($"Message {chatId}/{messageId} no longer contains a downloadable attachment matching type '{type ?? "file"}'.");
-
-            return await DownloadFileAsync(tg, refreshedAttachment.File);
-        }
-    }
-
-    internal static async Task<TdApi.File> DownloadFileAsync(TelegramSession tg, TdApi.File file)
-    {
-        if (file.Local is { IsDownloadingCompleted: true } &&
-            !string.IsNullOrWhiteSpace(file.Local.Path) &&
-            File.Exists(file.Local.Path))
-        {
-            return file;
-        }
-
-        return await tg.Client.DownloadFileAsync(file.Id, priority: 32, offset: 0, limit: 0, synchronous: true);
-    }
-
-    private static async Task<TdApi.File?> FindFileByIdAsync(TelegramSession tg, int fileId, AttachmentKind kind)
-    {
-        var chats = await tg.Client.GetChatsAsync(new TdApi.ChatList.ChatListMain(), 200);
-        var requestedType = kind switch
-        {
-            AttachmentKind.Voice => "voice",
-            AttachmentKind.Document => "document",
-            AttachmentKind.Audio => "audio",
-            AttachmentKind.Video => "video",
-            AttachmentKind.Photo => "photo",
-            AttachmentKind.Animation => "animation",
-            AttachmentKind.VideoNote => "video-note",
-            _ => null
-        };
-
-        foreach (var chatId in chats.ChatIds)
-        {
-            var cursor = 0L;
-            for (var page = 0; page < 10; page++)
-            {
-                var history = await tg.Client.GetChatHistoryAsync(chatId, cursor, 0, 200, onlyLocal: false);
-                if (history.Messages_.Length == 0)
-                {
-                    break;
-                }
-
-                foreach (var message in history.Messages_)
-                {
-                    if (kind == AttachmentKind.File)
-                    {
-                        var file = MessageFiles.GetAllFiles(message).FirstOrDefault(x => x.FileId == fileId);
-                        if (file is not null)
-                        {
-                            return file.File;
-                        }
-
-                        continue;
-                    }
-
-                    var attachment = MessageFiles.GetPrimaryAttachment(message.Content, requestedType);
-                    if (attachment?.FileId == fileId)
-                    {
-                        return attachment.File;
-                    }
-                }
-
-                if (history.Messages_.Length < 200)
-                {
-                    break;
-                }
-
-                cursor = history.Messages_.Min(x => x.Id);
-            }
-        }
-
-        return null;
+        using var stage = await AtomicDownload.StageAsync(file, destination, cancellationToken);
+        stage.Promote(cancellationToken);
     }
 
     private static int ClampLimit(int value, int max)
@@ -396,7 +281,7 @@ public sealed class TgCommands
             return fullOutput;
         }
 
-        var fileName = Path.GetFileName(file.Local.Path);
+        var fileName = Path.GetFileName(file.Local?.Path);
         if (string.IsNullOrWhiteSpace(fileName))
         {
             fileName = $"telegram-file-{file.Id}";
@@ -472,9 +357,11 @@ public sealed class MessageCommands
         TranscriptionCommands.ValidateFormat(format);
         await using var transcription = TranscriptionCommands.Create(true, language)!;
         await using var tg = await TelegramSession.CreateReadyAsync(session);
-        var message = await tg.Client.GetMessageAsync(chatId, messageId).WaitAsync(cancellationToken);
+        cancellationToken.ThrowIfCancellationRequested();
+        var message = await tg.Client.GetMessageAsync(chatId, messageId);
+        cancellationToken.ThrowIfCancellationRequested();
         var file = MediaTranscription.GetMedia(message);
-        var path = await MediaTranscription.DownloadAsync(tg, file, cancellationToken);
+        var path = await MediaTranscription.DownloadAsync(tg, file, cancellationToken, chatId: message.ChatId, messageId: message.Id);
         TranscriptionCommands.Write(await transcription.TranscribeFileAsync(path, cancellationToken), format, chatId, messageId);
     }
 
@@ -486,10 +373,15 @@ public sealed class MessageCommands
     /// <param name="session">Session directory. Defaults to ~/.local/share/tgcli.</param>
     public async Task Get(long chatId, long messageId, string format = "json", string? session = null)
     {
+        var normalizedFormat = format.Trim().ToLowerInvariant();
+        if (normalizedFormat is not ("json" or "jsonl" or "tsv" or "plain"))
+            throw new ArgumentException("Format must be one of: json, jsonl, tsv, plain.", nameof(format));
+
         await using var tg = await TelegramSession.CreateReadyAsync(session);
         var message = await tg.Client.GetMessageAsync(chatId, messageId);
         var links = await MessageLinks.BuildAsync(tg, chatId, messageId);
         var senderName = await FormatSenderNameAsync(tg, message.SenderId);
+        var files = MessageFiles.GetAllFiles(message);
 
         var payload = new JObject
         {
@@ -500,13 +392,13 @@ public sealed class MessageCommands
             ["sender"] = FormatSender(message.SenderId),
             ["sender_name"] = senderName,
             ["links"] = LinkCommandsJson(links),
-            ["files"] = new JArray(MessageFiles.GetAllFiles(message).Select(ToFileJson)),
+            ["files"] = new JArray(files.Select(ToFileJson)),
             ["message"] = JObject.FromObject(message, JsonSerializer.CreateDefault())
         };
 
-        await AttachmentIndex.RecordAsync(tg.SessionDirectory, message.ChatId, message.Id, MessageFiles.GetAllFiles(message));
+        await AttachmentIndex.RecordAsync(tg.SessionDirectory, message.ChatId, message.Id, files);
 
-        switch (format.Trim().ToLowerInvariant())
+        switch (normalizedFormat)
         {
             case "json":
             case "jsonl":
@@ -519,8 +411,6 @@ public sealed class MessageCommands
             case "plain":
                 Console.WriteLine(MessageFiles.GetMessageText(message.Content));
                 break;
-            default:
-                throw new ArgumentException("Format must be one of: json, jsonl, tsv, plain.", nameof(format));
         }
     }
 
@@ -535,22 +425,8 @@ public sealed class MessageCommands
         };
     }
 
-    private static JObject ToFileJson(MessageFile file)
-    {
-        return new JObject
-        {
-            ["kind"] = file.Kind,
-            ["file_id"] = file.FileId,
-            ["remote_id"] = file.RemoteId is null ? JValue.CreateNull() : file.RemoteId,
-            ["unique_id"] = file.UniqueId is null ? JValue.CreateNull() : file.UniqueId,
-            ["file_name"] = file.FileName is null ? JValue.CreateNull() : file.FileName,
-            ["mime_type"] = file.MimeType is null ? JValue.CreateNull() : file.MimeType,
-            ["width"] = file.Width is null ? JValue.CreateNull() : file.Width,
-            ["height"] = file.Height is null ? JValue.CreateNull() : file.Height,
-            ["size"] = file.Size is null ? JValue.CreateNull() : file.Size,
-            ["property_path"] = file.PropertyPath
-        };
-    }
+    private static JObject ToFileJson(MessageFile file) =>
+        ExportSchema.ToAttachmentJson(file, caption: string.Empty, generatedText: null);
 
     private static string FormatSender(TdApi.MessageSender? sender)
     {

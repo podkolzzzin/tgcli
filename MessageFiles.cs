@@ -15,7 +15,8 @@ internal sealed record MessageFile(
     int? Duration,
     long? Size,
     string PropertyPath,
-    TdApi.File File);
+    TdApi.File File,
+    string Role = "primary");
 
 internal static class MessageFiles
 {
@@ -37,7 +38,7 @@ internal static class MessageFiles
         return content switch
         {
             TdApi.MessageContent.MessageVoiceNote voice when Matches(requestedKind, AttachmentKind.Voice, AttachmentKind.File) =>
-                FromFile("voice", voice.VoiceNote?.Voice, null, null, null, null, voice.VoiceNote?.Duration, null, "content.voice_note.voice"),
+                FromFile("voice", voice.VoiceNote?.Voice, null, voice.VoiceNote?.MimeType, null, null, voice.VoiceNote?.Duration, null, "content.voice_note.voice"),
             TdApi.MessageContent.MessageAudio audio when Matches(requestedKind, AttachmentKind.Audio, AttachmentKind.File) =>
                 FromFile("audio", audio.Audio?.Audio_, audio.Audio?.FileName, audio.Audio?.MimeType, null, null, audio.Audio?.Duration, null, "content.audio.audio"),
             TdApi.MessageContent.MessageDocument document when Matches(requestedKind, AttachmentKind.Document, AttachmentKind.File) =>
@@ -59,9 +60,26 @@ internal static class MessageFiles
         var files = new List<MessageFile>();
         var seenObjects = new HashSet<object>(ReferenceEqualityComparer.Instance);
         var seenFiles = new HashSet<int>();
-        CollectFiles(message.Content, "content", files, seenObjects, seenFiles);
+        if (GetPrimaryAttachment(message.Content) is { } primary)
+        {
+            files.Add(primary);
+            seenFiles.Add(primary.FileId);
+        }
+
+        CollectFiles(message.Content, null, "content", files, seenObjects, seenFiles);
         return files;
     }
+
+    public static string GetCaption(TdApi.MessageContent? content) => content switch
+    {
+        TdApi.MessageContent.MessageVoiceNote voice => voice.Caption?.Text ?? string.Empty,
+        TdApi.MessageContent.MessageAudio audio => audio.Caption?.Text ?? string.Empty,
+        TdApi.MessageContent.MessageDocument document => document.Caption?.Text ?? string.Empty,
+        TdApi.MessageContent.MessagePhoto photo => photo.Caption?.Text ?? string.Empty,
+        TdApi.MessageContent.MessageVideo video => video.Caption?.Text ?? string.Empty,
+        TdApi.MessageContent.MessageAnimation animation => animation.Caption?.Text ?? string.Empty,
+        _ => string.Empty
+    };
 
     public static string GetMessageText(TdApi.MessageContent? content)
     {
@@ -93,6 +111,7 @@ internal static class MessageFiles
     private static MessageFile? FromPhoto(TdApi.MessageContent.MessagePhoto photo)
     {
         var size = photo.Photo?.Sizes?
+            .Where(x => x.Photo is not null)
             .OrderByDescending(x => (long)x.Width * x.Height)
             .FirstOrDefault();
 
@@ -125,7 +144,7 @@ internal static class MessageFiles
             width,
             height,
             duration,
-            size ?? file.Size,
+            size ?? (file.Size > 0 ? file.Size : file.ExpectedSize > 0 ? file.ExpectedSize : null),
             propertyPath,
             file);
     }
@@ -137,6 +156,7 @@ internal static class MessageFiles
 
     private static void CollectFiles(
         object? value,
+        object? parent,
         string path,
         List<MessageFile> files,
         HashSet<object> seenObjects,
@@ -151,19 +171,7 @@ internal static class MessageFiles
         {
             if (seenFiles.Add(file.Id))
             {
-                files.Add(new MessageFile(
-                    GuessKind(path),
-                    file.Id,
-                    file.Remote?.Id,
-                    file.Remote?.UniqueId,
-                    TryGetStringProperty(file, "FileName"),
-                    TryGetStringProperty(file, "MimeType"),
-                    TryGetIntProperty(file, "Width"),
-                    TryGetIntProperty(file, "Height"),
-                    TryGetIntProperty(file, "Duration"),
-                    file.Size,
-                    path,
-                    file));
+                files.Add(DescribeNestedFile(file, parent, path));
             }
 
             return;
@@ -185,7 +193,7 @@ internal static class MessageFiles
             var index = 0;
             foreach (var item in enumerable)
             {
-                CollectFiles(item, $"{path}[{index++}]", files, seenObjects, seenFiles);
+                CollectFiles(item, value, $"{path}[{index++}]", files, seenObjects, seenFiles);
             }
 
             return;
@@ -208,69 +216,45 @@ internal static class MessageFiles
                 continue;
             }
 
-            CollectFiles(child, $"{path}.{ToSnakeCase(property.Name)}", files, seenObjects, seenFiles);
+            CollectFiles(child, value, $"{path}.{ToSnakeCase(property.Name)}", files, seenObjects, seenFiles);
         }
     }
 
-    private static string GuessKind(string path)
+    private static MessageFile DescribeNestedFile(TdApi.File file, object? parent, string path) =>
+        parent switch
+        {
+            TdApi.Thumbnail thumbnail => FromFile("thumbnail", file, null, ThumbnailMimeType(thumbnail.Format),
+                thumbnail.Width, thumbnail.Height, null, null, path)! with { Role = "thumbnail" },
+            TdApi.PhotoSize photo => FromFile("photo", file, null, "image/jpeg",
+                photo.Width, photo.Height, null, null, path)! with { Role = "variant" },
+            TdApi.Video video => FromFile("video", file, video.FileName, video.MimeType, video.Width,
+                video.Height, video.Duration, null, path)! with { Role = "auxiliary" },
+            TdApi.Animation animation => FromFile("animation", file, animation.FileName, animation.MimeType,
+                animation.Width, animation.Height, animation.Duration, null, path)! with { Role = "auxiliary" },
+            TdApi.Audio audio => FromFile("audio", file, audio.FileName, audio.MimeType, null,
+                null, audio.Duration, null, path)! with { Role = "auxiliary" },
+            TdApi.Document document => FromFile("document", file, document.FileName, document.MimeType,
+                null, null, null, null, path)! with { Role = "auxiliary" },
+            TdApi.VideoNote videoNote => FromFile("video-note", file, null, "video/mp4",
+                videoNote.Length, videoNote.Length, videoNote.Duration, null, path)! with { Role = "auxiliary" },
+            TdApi.VoiceNote voiceNote => FromFile("voice", file, null, voiceNote.MimeType, null,
+                null, voiceNote.Duration, null, path)! with { Role = "auxiliary" },
+            _ => FromFile("file", file, null, null, null, null, null, null, path)! with { Role = "auxiliary" }
+        };
+
+    private static string? ThumbnailMimeType(TdApi.ThumbnailFormat? format) => format switch
     {
-        var normalized = path.ToLowerInvariant();
-        if (normalized.Contains("voice"))
-        {
-            return "voice";
-        }
-
-        if (normalized.Contains("audio"))
-        {
-            return "audio";
-        }
-
-        if (normalized.Contains("document"))
-        {
-            return "document";
-        }
-
-        if (normalized.Contains("photo"))
-        {
-            return "photo";
-        }
-
-        if (normalized.Contains("video_note"))
-        {
-            return "video-note";
-        }
-
-        if (normalized.Contains("video"))
-        {
-            return "video";
-        }
-
-        if (normalized.Contains("animation"))
-        {
-            return "animation";
-        }
-
-        if (normalized.Contains("thumbnail"))
-        {
-            return "thumbnail";
-        }
-
-        return "file";
-    }
-
-    private static string? TryGetStringProperty(object value, string propertyName)
-    {
-        return value.GetType().GetProperty(propertyName)?.GetValue(value) as string;
-    }
-
-    private static int? TryGetIntProperty(object value, string propertyName)
-    {
-        return value.GetType().GetProperty(propertyName)?.GetValue(value) as int?;
-    }
+        TdApi.ThumbnailFormat.ThumbnailFormatJpeg => "image/jpeg",
+        TdApi.ThumbnailFormat.ThumbnailFormatPng => "image/png",
+        TdApi.ThumbnailFormat.ThumbnailFormatWebp => "image/webp",
+        TdApi.ThumbnailFormat.ThumbnailFormatGif => "image/gif",
+        TdApi.ThumbnailFormat.ThumbnailFormatMpeg4 => "video/mp4",
+        _ => null
+    };
 
     private static string ToSnakeCase(string value)
     {
-        return string.Concat(value.Select((ch, i) => i > 0 && char.IsUpper(ch) ? "_" + char.ToLowerInvariant(ch) : char.ToLowerInvariant(ch).ToString()));
+        return string.Concat(value.TrimEnd('_').Select((ch, i) => i > 0 && char.IsUpper(ch) ? "_" + char.ToLowerInvariant(ch) : char.ToLowerInvariant(ch).ToString()));
     }
 
     private static string FirstNonEmpty(params string?[] values)

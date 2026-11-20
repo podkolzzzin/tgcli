@@ -14,25 +14,25 @@ internal static class ExportSchema
         ExportedMessage item,
         bool includeLinks,
         MediaTranscription? transcription = null,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        bool local = false)
     {
+        cancellationToken.ThrowIfCancellationRequested();
         var message = item.Message;
-        var sender = await ResolveSenderAsync(tg, message.SenderId);
+        var sender = local ? GetSenderIdentity(message.SenderId) : await ResolveSenderAsync(tg, message.SenderId);
         var (replyChatId, replyMessageId) = GetReplyTarget(message);
-        var replyPreview = await ResolveReplyPreviewAsync(tg, replyChatId, replyMessageId);
-        var links = includeLinks ? await MessageLinks.BuildAsync(tg, message.ChatId, message.Id) : null;
-        var files = new JArray();
+        var replyPreview = await ResolveReplyPreviewAsync(tg, replyChatId, replyMessageId, local, cancellationToken);
+        var links = !includeLinks ? null : local
+            ? new MessageLinkInfo(message.ChatId, message.Id, MessageLinks.GetShortMessageId(message.Id),
+                MessageLinks.GetTgUrl(message.ChatId, message.Id), null, null)
+            : await MessageLinks.BuildAsync(tg, message.ChatId, message.Id);
+        cancellationToken.ThrowIfCancellationRequested();
+        var attachments = MessageFiles.GetAllFiles(message);
+        var files = await BuildAttachmentRowsAsync(message, attachments, transcription,
+            file => MediaTranscription.DownloadAsync(tg, file, cancellationToken, local, message.ChatId, message.Id),
+            cancellationToken);
 
-        var primary = MessageFiles.GetPrimaryAttachment(message.Content);
-        foreach (var file in MessageFiles.GetAllFiles(message))
-        {
-            var generatedText = primary?.FileId == file.FileId
-                ? await MediaTranscription.TranscribeAttachmentAsync(primary, transcription, f => MediaTranscription.DownloadAsync(tg, f, cancellationToken), cancellationToken)
-                : null;
-            files.Add(ToAttachmentJson(file, MessageFiles.GetMessageText(message.Content), generatedText));
-        }
-
-        await AttachmentIndex.RecordAsync(tg.SessionDirectory, message.ChatId, message.Id, MessageFiles.GetAllFiles(message));
+        await AttachmentIndex.RecordAsync(tg.SessionDirectory, message.ChatId, message.Id, attachments);
         var metrics = ToMetricsJson(message.InteractionInfo);
 
         return new JObject
@@ -156,13 +156,17 @@ internal static class ExportSchema
             // Identity ids remain useful even when profile lookup is inaccessible.
         }
 
-        return sender switch
+        return GetSenderIdentity(sender);
+    }
+
+    private static (string Type, long? UserId, long? ChatId, string DisplayName, string? Username) GetSenderIdentity(
+        TdApi.MessageSender? sender) =>
+        sender switch
         {
             TdApi.MessageSender.MessageSenderUser user => ("user", user.UserId, null, string.Empty, null),
             TdApi.MessageSender.MessageSenderChat chat => ("chat", null, chat.ChatId, string.Empty, null),
             _ => ("unknown", null, null, string.Empty, null)
         };
-    }
 
     private static (long? ChatId, long? MessageId) GetReplyTarget(TdApi.Message message)
     {
@@ -171,11 +175,11 @@ internal static class ExportSchema
             return (null, null);
         }
 
-        var chatId = ChatHistory.GetLongProperty(reply, "ChatId");
-        return (chatId is null or 0 ? message.ChatId : chatId, reply.MessageId);
+        return (reply.ChatId == 0 ? message.ChatId : reply.ChatId, reply.MessageId);
     }
 
-    private static async Task<JToken> ResolveReplyPreviewAsync(TelegramSession tg, long? chatId, long? messageId)
+    private static async Task<JToken> ResolveReplyPreviewAsync(
+        TelegramSession tg, long? chatId, long? messageId, bool local, CancellationToken cancellationToken)
     {
         if (chatId is null || messageId is null or 0)
         {
@@ -184,7 +188,13 @@ internal static class ExportSchema
 
         try
         {
-            var target = await tg.Client.GetMessageAsync(chatId.Value, messageId.Value);
+            cancellationToken.ThrowIfCancellationRequested();
+            var target = local
+                ? await tg.Client.GetMessageLocallyAsync(chatId.Value, messageId.Value)
+                : await tg.Client.GetMessageAsync(chatId.Value, messageId.Value);
+            cancellationToken.ThrowIfCancellationRequested();
+            if (target.ChatId != chatId || target.Id != messageId)
+                throw new InvalidOperationException("Telegram returned a different reply target.");
             return new JObject
             {
                 ["chat_id"] = target.ChatId,
@@ -195,7 +205,7 @@ internal static class ExportSchema
                 ["resolved"] = true
             };
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return new JObject
             {
@@ -207,12 +217,32 @@ internal static class ExportSchema
         }
     }
 
+    internal static async Task<JArray> BuildAttachmentRowsAsync(
+        TdApi.Message message,
+        IReadOnlyList<MessageFile> attachments,
+        MediaTranscription? transcription,
+        Func<MessageFile, Task<string>> download,
+        CancellationToken cancellationToken)
+    {
+        var rows = new JArray();
+        var caption = MessageFiles.GetCaption(message.Content);
+        foreach (var file in attachments)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var generatedText = await MediaTranscription.TranscribeAttachmentAsync(file, transcription, download, cancellationToken);
+            rows.Add(ToAttachmentJson(file, caption, generatedText));
+        }
+
+        return rows;
+    }
+
     internal static JObject ToAttachmentJson(MessageFile file, string caption, MediaTranscript? generatedText)
     {
         var local = file.File.Local;
         return new JObject
         {
             ["kind"] = file.Kind,
+            ["role"] = file.Role,
             ["file_id"] = file.FileId,
             ["remote_id"] = file.RemoteId,
             ["unique_id"] = file.UniqueId,
@@ -222,6 +252,7 @@ internal static class ExportSchema
             ["height"] = file.Height,
             ["duration"] = file.Duration,
             ["size"] = file.Size,
+            ["property_path"] = file.PropertyPath,
             ["caption"] = caption,
             ["download_state"] = local is null ? "unknown" :
                 local.IsDownloadingCompleted ? "downloaded" :
