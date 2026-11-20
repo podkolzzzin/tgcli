@@ -1,15 +1,59 @@
-name: e2e
+name: Windows package ACL probe
 
 on:
-  pull_request:
-  push:
-    branches:
-      - main
   workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
-  package:
-    uses: ./.github/workflows/package.yml
+  probe:
+    runs-on: windows-2025
+    steps:
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.x"
+      - name: Inspect the inherited ACL before and after replacement
+        shell: pwsh
+        run: |
+          @'
+          import os
+          from pathlib import Path
+          import subprocess
+          import tempfile
+
+          system = Path(os.environ['SystemRoot']) / 'System32'
+          powershell = system / 'WindowsPowerShell' / 'v1.0' / 'powershell.exe'
+          icacls = system / 'icacls.exe'
+
+          def command(label, *args, **kwargs):
+              result = subprocess.run(args, capture_output=True, text=True, errors='backslashreplace', timeout=30, **kwargs)
+              print(f'{label}: exit={result.returncode} stdout={result.stdout!r} stderr={result.stderr!r}', flush=True)
+              return result
+
+          with tempfile.TemporaryDirectory(prefix='tgcli-cli-e2e-') as temporary:
+              home = Path(temporary) / 'isolated profile'
+              installed = home / 'installed'
+              installed.mkdir(parents=True)
+              result = command('grant inherited fixture ACE', str(icacls), str(installed), '/grant', '*S-1-5-11:(OI)(CI)(RX)')
+              assert result.returncode == 0
+              target = installed / 'tgcli.exe'
+              target.write_bytes(b'previous synthetic installation')
+              env = dict(os.environ, TGCLI_ACL_FILE=str(target))
+              ps = [str(powershell), '-NoProfile', '-NonInteractive', '-Command']
+              old = '(Get-Acl -LiteralPath $env:TGCLI_ACL_FILE).Access | ForEach-Object { $_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value }'
+              command('original query on sentinel', *ps, old, env=env)
+              with tempfile.TemporaryDirectory(prefix='.tgcli-update-', dir=installed) as stage:
+                  candidate = Path(stage) / 'tgcli-win-x64.exe'
+                  candidate.write_bytes(b'verified synthetic candidate')
+                  fd, sibling = tempfile.mkstemp(prefix='.tgcli-install-', dir=installed)
+                  with os.fdopen(fd, 'wb') as output:
+                      output.write(candidate.read_bytes())
+                  os.replace(sibling, target)
+              assert target.read_bytes() == b'verified synthetic candidate'
+              assert list(installed.iterdir()) == [target]
+              command('original query on replacement', *ps, old, env=env)
+              command('SDDL', *ps, '(Get-Acl -LiteralPath $env:TGCLI_ACL_FILE -ErrorAction Stop).Sddl', env=env)
+              command('icacls query on replacement', str(icacls), str(target))
+          '@ | python -
