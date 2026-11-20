@@ -25,7 +25,10 @@ public sealed class McpProtocolTests
         Assert.Equal(12, names.Length);
         Assert.Equal(names.Order(StringComparer.Ordinal), names);
         var call = await server.Request("tools/call", new() { ["name"] = "message_get", ["arguments"] = new JsonObject { ["chat_id"] = "-1001234567890", ["message_id"] = "9223372036854775807" } });
-        Assert.Equal("-1001234567890", call["result"]!["structuredContent"]!["chat_id"]!.GetValue<string>());
+        var message = call["result"]!["structuredContent"]!;
+        Assert.Equal("-1001234567890", message["chat_id"]!.GetValue<string>());
+        Assert.Equal("9223372036854775807", message["message_id"]!.GetValue<string>());
+        Assert.Equal("8.0", message["schema_version"]!.GetValue<string>());
         Assert.Equal("complete", call["result"]!["resultType"]!.GetValue<string>());
         await server.Stop();
     }
@@ -41,7 +44,9 @@ public sealed class McpProtocolTests
         Assert.Equal(-32022, rejected["error"]!["code"]!.GetValue<int>());
         Assert.Equal("2026-07-28", rejected["error"]!["data"]!["supported"]![0]!.GetValue<string>());
         var next = await server.Request("tools/call", new() { ["name"] = "diagnostics" });
-        Assert.Equal("diagnostics", next["result"]!["structuredContent"]!["tool"]!.GetValue<string>());
+        var diagnostic = next["result"]!["structuredContent"]!;
+        Assert.False(diagnostic["healthy"]!.GetValue<bool>());
+        Assert.Equal("login_required", diagnostic["error_code"]!.GetValue<string>());
     }
 
     [Fact]

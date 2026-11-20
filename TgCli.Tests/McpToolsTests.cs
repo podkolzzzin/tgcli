@@ -5,8 +5,6 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Threading;
 using System.Threading.Tasks;
-using Newtonsoft.Json.Linq;
-using TdLib;
 using Xunit;
 
 namespace TgCli.Tests;
@@ -53,20 +51,6 @@ public sealed class McpToolsTests
     }
 
     [Fact]
-    public void McpConversionPreservesCliDataAndUsesStringsOnlyFor64BitIds()
-    {
-        var original = new JObject { ["chat_id"] = long.MinValue, ["topic_id"] = 21, ["file_id"] = 123,
-            ["nested"] = new JObject { ["MessageId"] = long.MaxValue }, ["migrations"] = new JArray(-1001234567890L) };
-        var result = McpTelegramBackend.ConvertObject(original);
-        Assert.Equal(JTokenType.Integer, original["chat_id"]!.Type);
-        Assert.Equal("-9223372036854775808", result["chat_id"]!.GetValue<string>());
-        Assert.Equal("9223372036854775807", result["nested"]!["MessageId"]!.GetValue<string>());
-        Assert.Equal(21, result["topic_id"]!.GetValue<int>());
-        Assert.Equal(123, result["file_id"]!.GetValue<int>());
-        Assert.Equal("-1001234567890", result["migrations"]![0]!.GetValue<string>());
-    }
-
-    [Fact]
     public async Task OversizedResultIsAnExplicitToolErrorAndServerRemainsUsable()
     {
         await using var backend = new Backend();
@@ -96,23 +80,16 @@ public sealed class McpToolsTests
     }
 
     [Fact]
-    public void MessagePagesAdvanceAcrossFilteringAndUseSearchContinuationVerbatim()
+    public void AdvertisedSchemaUsesDecimalIdentifiersAndRichMessageVersion()
     {
-        static TdApi.Message Message(long id) => new() { Id = id, ChatId = -1001,
-            Content = new TdApi.MessageContent.MessageText { Text = new TdApi.FormattedText { Text = "hello", Entities = [] } } };
-        var page = McpMessagePage.From([Message(300), Message(200), Message(200)], null);
-        Assert.Equal(new long[] { 300, 200 }, page.Messages.Select(m => m.Id));
-        Assert.Empty(ChatCommands.FilterMessages(page.Messages, false, "video"));
-        Assert.Equal(199, page.Next);
-        Assert.True(page.HasMore);
-        var next = McpMessagePage.From([Message(100)], page.Next);
-        Assert.Empty(next.Messages.Select(m => m.Id).Intersect(page.Messages.Select(m => m.Id)));
-        Assert.Equal(99, next.Next);
-        Assert.False(McpMessagePage.From([], next.Next).HasMore);
-        Assert.Equal(150, McpMessagePage.From(page.Messages, null, 150).Next);
-        Assert.True(McpMessagePage.From([], 150, 100).HasMore);
-        Assert.False(McpMessagePage.From([Message(100)], 150, 0).HasMore);
-        Assert.Throws<InvalidOperationException>(() => McpMessagePage.From([Message(300)], 199));
+        var topics = McpTools.Catalog.Single(tool => tool.Name == "forum_topics").OutputSchema!.Value;
+        var topicFields = topics.GetProperty("properties").GetProperty("items").GetProperty("items").GetProperty("properties");
+        Assert.Equal("string", topicFields.GetProperty("topic_id").GetProperty("type").GetString());
+
+        var message = McpTools.Catalog.Single(tool => tool.Name == "message_get").OutputSchema!.Value.GetProperty("properties");
+        Assert.Equal("8.0", message.GetProperty("schema_version").GetProperty("const").GetString());
+        Assert.Equal("string", message.GetProperty("attachments").GetProperty("items")
+            .GetProperty("properties").GetProperty("file_id").GetProperty("type").GetString());
     }
 
     private sealed class Backend : IMcpTelegramBackend
