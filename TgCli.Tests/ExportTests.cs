@@ -50,7 +50,7 @@ public sealed class ExportTests
         var value = ExportSchema.Tombstone(10, 20);
 
         Assert.Equal("tgcli.message", value.Value<string>("schema"));
-        Assert.Equal("5.0", value.Value<string>("schema_version"));
+        Assert.Equal("8.0", value.Value<string>("schema_version"));
         Assert.True(value.Value<bool>("is_deleted"));
         Assert.Equal(10, value.Value<long>("chat_id"));
         Assert.Equal(20, value.Value<long>("message_id"));

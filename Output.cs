@@ -24,11 +24,11 @@ internal sealed record ChatRow(
     [property: JsonPropertyName("type")]
     string Type,
     [property: JsonPropertyName("username")]
-    string Username,
+    string? Username,
     [property: JsonPropertyName("unread")]
     int Unread,
     [property: JsonPropertyName("last_message")]
-    string LastMessage);
+    string? LastMessage);
 
 internal sealed record MessageRow(
     [property: JsonPropertyName("chat_id")]
@@ -206,7 +206,7 @@ internal static class Output
         return new JObject(value.Properties().Where(property => names.Contains(property.Name)));
     }
 
-    private static void PrintChats(IEnumerable<ChatRow> rows, OutputFormat format, TextWriter writer)
+    internal static void PrintChats(IEnumerable<ChatRow> rows, OutputFormat format, TextWriter writer)
     {
         switch (format)
         {
@@ -224,11 +224,18 @@ internal static class Output
                 }
                 break;
 
+            case OutputFormat.Json:
+                writer.WriteLine(new JArray(rows.Select(ToChatJson)).ToString(Newtonsoft.Json.Formatting.None));
+                break;
+
             case OutputFormat.Jsonl:
                 foreach (var row in rows)
-                {
-                    writer.WriteLine(JsonSerializer.Serialize(row, JsonOptions));
-                }
+                    writer.WriteLine(ToChatJson(row).ToString(Newtonsoft.Json.Formatting.None));
+                break;
+
+            case OutputFormat.Plain:
+                foreach (var row in rows)
+                    writer.WriteLine(row.Title);
                 break;
 
             case OutputFormat.Md:
@@ -353,9 +360,22 @@ internal static class Output
         }
     }
 
-    internal static async Task<ChatRow> BuildChatRowAsync(TelegramSession tg, TdApi.Chat chat)
+    internal static JObject ToChatJson(ChatRow row) => new()
     {
-        var username = await MessageLinks.TryGetUsernameAsync(tg, chat.Id) ?? string.Empty;
+        ["chat_id"] = Wire.Id(row.ChatId),
+        ["title"] = row.Title,
+        ["type"] = row.Type,
+        ["username"] = row.Username,
+        ["unread"] = row.Unread,
+        ["last_message"] = row.LastMessage
+    };
+
+    internal static async Task<ChatRow> BuildChatRowAsync(TelegramSession tg, TdApi.Chat chat, bool local = false,
+        CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        var username = local ? null : await MessageLinks.TryGetUsernameAsync(tg, chat.Id, cancellationToken,
+            retainNativeOperation: true);
 
         return new ChatRow(
             chat.Id,
@@ -394,11 +414,11 @@ internal static class Output
             query);
     }
 
-    private static string SummarizeMessage(TdApi.Message? message)
+    private static string? SummarizeMessage(TdApi.Message? message)
     {
         if (message is null)
         {
-            return string.Empty;
+            return null;
         }
 
         var attachment = MessageFiles.GetPrimaryAttachment(message.Content);

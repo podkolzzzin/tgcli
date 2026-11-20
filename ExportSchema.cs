@@ -1,4 +1,3 @@
-using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using TdLib;
 
@@ -7,7 +6,7 @@ namespace TgCli;
 internal static class ExportSchema
 {
     public const string Name = "tgcli.message";
-    public const string Version = "5.0";
+    public const string Version = "8.0";
 
     public static async Task<JObject> BuildMessageAsync(
         TelegramSession tg,
@@ -15,17 +14,17 @@ internal static class ExportSchema
         bool includeLinks,
         MediaTranscription? transcription = null,
         CancellationToken cancellationToken = default,
-        bool local = false)
+        bool local = false,
+        string? query = null)
     {
         cancellationToken.ThrowIfCancellationRequested();
         var message = item.Message;
-        var sender = local ? GetSenderIdentity(message.SenderId) : await ResolveSenderAsync(tg, message.SenderId);
+        var sender = local ? GetSenderIdentity(message.SenderId) : await ResolveSenderAsync(tg, message.SenderId, cancellationToken);
         var (replyChatId, replyMessageId) = GetReplyTarget(message);
         var replyPreview = await ResolveReplyPreviewAsync(tg, replyChatId, replyMessageId, local, cancellationToken);
         var links = !includeLinks ? null : local
-            ? new MessageLinkInfo(message.ChatId, message.Id, ChatHistory.GetShortMessageId(message.Id),
-                MessageLinks.GetTgUrl(message.ChatId, message.Id), null, null)
-            : await MessageLinks.BuildAsync(tg, message.ChatId, message.Id);
+            ? Wire.LocalLink(message.ChatId, message.Id)
+            : await MessageLinks.BuildAsync(tg, message.ChatId, message.Id, cancellationToken, retainNativeOperation: true);
         cancellationToken.ThrowIfCancellationRequested();
         var attachments = MessageFiles.GetAllFiles(message);
         var files = await BuildAttachmentRowsAsync(message, attachments, transcription,
@@ -33,32 +32,36 @@ internal static class ExportSchema
             cancellationToken);
 
         await AttachmentIndex.RecordAsync(tg.SessionDirectory, message.ChatId, message.Id, attachments);
+        cancellationToken.ThrowIfCancellationRequested();
         var metrics = ToMetricsJson(message.InteractionInfo);
 
         return new JObject
         {
             ["schema"] = Name,
             ["schema_version"] = Version,
-            ["chat_id"] = message.ChatId,
-            ["message_id"] = message.Id,
-            ["short_message_id"] = ChatHistory.GetShortMessageId(message.Id),
+            ["chat_id"] = Wire.Id(message.ChatId),
+            ["message_id"] = Wire.Id(message.Id),
+            ["short_message_id"] = Wire.NullableId(ChatHistory.TryGetPublicPostId(message.Id)),
             ["tg_url"] = MessageLinks.GetTgUrl(message.ChatId, message.Id),
-            ["source_chat_id"] = item.SourceChatId,
-            ["date"] = FormatTimestamp(message.Date),
-            ["edit_date"] = message.EditDate == 0 ? JValue.CreateNull() : FormatTimestamp(message.EditDate),
+            ["source_chat_id"] = Wire.Id(item.SourceChatId),
+            ["original_chat_id"] = Wire.Id(item.OriginalChatId),
+            ["original_message_id"] = Wire.Id(item.OriginalMessageId),
+            ["query"] = query,
+            ["date"] = Wire.Timestamp(message.Date),
+            ["edit_date"] = message.EditDate == 0 ? JValue.CreateNull() : Wire.Timestamp(message.EditDate),
             ["sender_type"] = sender.Type,
-            ["sender_user_id"] = sender.UserId is null ? JValue.CreateNull() : sender.UserId,
-            ["sender_chat_id"] = sender.ChatId is null ? JValue.CreateNull() : sender.ChatId,
+            ["sender_user_id"] = Wire.NullableId(sender.UserId),
+            ["sender_chat_id"] = Wire.NullableId(sender.ChatId),
             ["sender_display_name"] = sender.DisplayName,
             ["sender_username"] = string.IsNullOrWhiteSpace(sender.Username) ? JValue.CreateNull() : sender.Username,
             ["kind"] = MessageFiles.GetKind(message.Content),
             ["text"] = MessageFiles.GetMessageText(message.Content),
             ["entities"] = ExtractEntities(message.Content),
-            ["reply_to_chat_id"] = replyChatId is null ? JValue.CreateNull() : replyChatId,
-            ["reply_to_message_id"] = replyMessageId is null ? JValue.CreateNull() : replyMessageId,
+            ["reply_to_chat_id"] = Wire.NullableId(replyChatId),
+            ["reply_to_message_id"] = Wire.NullableId(replyMessageId),
             ["reply_target"] = replyPreview,
-            ["forward_origin"] = ToToken(message.ForwardInfo),
-            ["interaction_info"] = ToToken(message.InteractionInfo),
+            ["forward_origin"] = Wire.NativeDetails(message.ForwardInfo),
+            ["interaction_info"] = Wire.NativeDetails(message.InteractionInfo),
             ["interaction_info_available"] = metrics["interaction_info_available"],
             ["view_count"] = metrics["view_count"],
             ["forward_count"] = metrics["forward_count"],
@@ -66,18 +69,12 @@ internal static class ExportSchema
             ["reaction_counts"] = metrics["reaction_counts"],
             ["paid_reaction_count"] = metrics["paid_reaction_count"],
             ["has_comments"] = metrics["has_comments"],
-            ["poll"] = message.Content is TdApi.MessageContent.MessagePoll poll ? ToToken(poll.Poll) : JValue.CreateNull(),
-            ["service_event"] = ChatCommands.IsServiceMessage(message.Content) ? ToToken(message.Content) : JValue.CreateNull(),
+            ["poll"] = message.Content is TdApi.MessageContent.MessagePoll poll ? Wire.NativeDetails(poll.Poll) : JValue.CreateNull(),
+            ["service_event"] = ChatCommands.IsServiceMessage(message.Content) ? Wire.NativeDetails(message.Content) : JValue.CreateNull(),
             ["attachments"] = files,
             ["is_deleted"] = false,
             ["tombstone"] = JValue.CreateNull(),
-            ["links"] = links is null ? JValue.CreateNull() : new JObject
-            {
-                ["short_message_id"] = links.ShortMessageId,
-                ["tg_url"] = links.TgUrl,
-                ["https_url"] = links.HttpsUrl,
-                ["https_fallback"] = links.HttpsFallback
-            }
+            ["links"] = links is null ? JValue.CreateNull() : Wire.Link(links)
         };
     }
 
@@ -85,8 +82,8 @@ internal static class ExportSchema
     {
         ["schema"] = Name,
         ["schema_version"] = Version,
-        ["chat_id"] = chatId,
-        ["message_id"] = messageId,
+        ["chat_id"] = Wire.NullableId(chatId),
+        ["message_id"] = Wire.NullableId(messageId),
         ["is_deleted"] = true,
         ["tombstone"] = new JObject { ["reason"] = reason ?? "missing_from_incremental_refresh" }
     };
@@ -119,7 +116,7 @@ internal static class ExportSchema
             {
                 ["type"] = type,
                 ["emoji"] = emoji is null ? JValue.CreateNull() : emoji,
-                ["custom_emoji_id"] = customEmojiId is null ? JValue.CreateNull() : customEmojiId,
+                ["custom_emoji_id"] = Wire.NullableId(customEmojiId),
                 ["count"] = (long)reaction.TotalCount,
                 ["chosen"] = reaction.IsChosen
             });
@@ -136,15 +133,17 @@ internal static class ExportSchema
         _ => ("unknown", null, null)
     };
 
-    private static async Task<(string Type, long? UserId, long? ChatId, string DisplayName, string? Username)> ResolveSenderAsync(
+    private static async Task<(string Type, long? UserId, long? ChatId, string? DisplayName, string? Username)> ResolveSenderAsync(
         TelegramSession tg,
-        TdApi.MessageSender? sender)
+        TdApi.MessageSender? sender,
+        CancellationToken cancellationToken)
     {
         try
         {
             if (sender is TdApi.MessageSender.MessageSenderUser userSender)
             {
-                var user = await tg.Client.GetUserAsync(userSender.UserId);
+                var user = await TelegramOperations.AwaitReadAsync(tg.Client.GetUserAsync(userSender.UserId),
+                    cancellationToken, retainNativeOperation: true);
                 var displayName = $"{user.FirstName} {user.LastName}".Trim();
                 var username = user.Usernames?.ActiveUsernames?.FirstOrDefault();
                 return ("user", userSender.UserId, null, displayName, username);
@@ -152,11 +151,13 @@ internal static class ExportSchema
 
             if (sender is TdApi.MessageSender.MessageSenderChat chatSender)
             {
-                var chat = await tg.Client.GetChatAsync(chatSender.ChatId);
-                return ("chat", null, chatSender.ChatId, chat.Title, await MessageLinks.TryGetUsernameAsync(tg, chatSender.ChatId));
+                var chat = await TelegramOperations.AwaitReadAsync(tg.Client.GetChatAsync(chatSender.ChatId),
+                    cancellationToken, retainNativeOperation: true);
+                return ("chat", null, chatSender.ChatId, chat.Title,
+                    await MessageLinks.TryGetUsernameAsync(tg, chatSender.ChatId, cancellationToken, retainNativeOperation: true));
             }
         }
-        catch
+        catch (TdException ex) when (ex.Error.Code is 400 or 403 or 404)
         {
             // Identity ids remain useful even when profile lookup is inaccessible.
         }
@@ -164,13 +165,13 @@ internal static class ExportSchema
         return GetSenderIdentity(sender);
     }
 
-    private static (string Type, long? UserId, long? ChatId, string DisplayName, string? Username) GetSenderIdentity(
+    private static (string Type, long? UserId, long? ChatId, string? DisplayName, string? Username) GetSenderIdentity(
         TdApi.MessageSender? sender) =>
         sender switch
         {
-            TdApi.MessageSender.MessageSenderUser user => ("user", user.UserId, null, string.Empty, null),
-            TdApi.MessageSender.MessageSenderChat chat => ("chat", null, chat.ChatId, string.Empty, null),
-            _ => ("unknown", null, null, string.Empty, null)
+            TdApi.MessageSender.MessageSenderUser user => ("user", user.UserId, null, null, null),
+            TdApi.MessageSender.MessageSenderChat chat => ("chat", null, chat.ChatId, null, null),
+            _ => ("unknown", null, null, null, null)
         };
 
     private static (long? ChatId, long? MessageId) GetReplyTarget(TdApi.Message message)
@@ -202,22 +203,22 @@ internal static class ExportSchema
                 throw new InvalidOperationException("Telegram returned a different reply target.");
             return new JObject
             {
-                ["chat_id"] = target.ChatId,
-                ["message_id"] = target.Id,
-                ["date"] = FormatTimestamp(target.Date),
+                ["chat_id"] = Wire.Id(target.ChatId),
+                ["message_id"] = Wire.Id(target.Id),
+                ["date"] = Wire.Timestamp(target.Date),
                 ["kind"] = MessageFiles.GetKind(target.Content),
                 ["text"] = Truncate(MessageFiles.GetMessageText(target.Content), 240),
                 ["resolved"] = true
             };
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        catch (TdException ex) when (ex.Error.Code is 400 or 403 or 404)
         {
             return new JObject
             {
-                ["chat_id"] = chatId,
-                ["message_id"] = messageId,
+                ["chat_id"] = Wire.NullableId(chatId),
+                ["message_id"] = Wire.NullableId(messageId),
                 ["resolved"] = false,
-                ["error"] = ex.Message
+                ["error"] = local ? "reply_not_cached" : "reply_unavailable"
             };
         }
     }
@@ -248,7 +249,7 @@ internal static class ExportSchema
         {
             ["kind"] = file.Kind,
             ["role"] = file.Role,
-            ["file_id"] = file.FileId,
+            ["file_id"] = Wire.Id(file.FileId),
             ["remote_id"] = file.RemoteId,
             ["unique_id"] = file.UniqueId,
             ["file_name"] = file.FileName,
@@ -272,14 +273,8 @@ internal static class ExportSchema
     {
         object? formattedText = content?.GetType().GetProperty("Text")?.GetValue(content)
             ?? content?.GetType().GetProperty("Caption")?.GetValue(content);
-        return ToToken(formattedText?.GetType().GetProperty("Entities")?.GetValue(formattedText));
+        return Wire.NativeDetails(formattedText?.GetType().GetProperty("Entities")?.GetValue(formattedText));
     }
-
-    private static JToken ToToken(object? value) =>
-        value is null ? JValue.CreateNull() : JToken.FromObject(value, JsonSerializer.CreateDefault());
-
-    private static JValue FormatTimestamp(int unixSeconds) =>
-        new(DateTimeOffset.FromUnixTimeSeconds(unixSeconds).ToString("O", System.Globalization.CultureInfo.InvariantCulture));
 
     private static string Truncate(string value, int max) => value.Length <= max ? value : value[..max] + "…";
 }
