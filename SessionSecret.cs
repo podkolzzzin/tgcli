@@ -1,3 +1,4 @@
+using System.Buffers.Binary;
 using System.ComponentModel.DataAnnotations;
 using System.IO.Compression;
 using System.Text;
@@ -24,7 +25,7 @@ public sealed class SessionCommands
     public void Import(string? session = null, bool force = false)
     {
         using var reader = new StreamReader(Console.OpenStandardInput());
-        var secret = reader.ReadToEnd();
+        var secret = SessionSecret.ReadInput(reader);
         SessionSecret.Import(secret, session, force);
     }
 
@@ -80,87 +81,136 @@ internal static class SessionSecret
     public const string ManifestPath = "manifest.json";
     public const string ConfigPath = "config.json";
     public const string BinlogPath = "tdlib-db/td.binlog";
+    internal const int MaxConfigBytes = 64 * 1024;
+    private const int MaxPayloadBytes = 72 * 1024 * 1024;
+    private const int MaxEncodedChars = (MaxPayloadBytes + 2) / 3 * 4;
+    private const int MaxInputChars = MaxEncodedChars + 4 * 1024 * 1024;
     private const string Format = "tgcli.session";
     private const int FormatVersion = 1;
+    private const string TransactionName = ".tgcli-session-import";
+    private const string RetiredPrefix = ".tgcli-session-import-retired-";
 
     public static string Export(string? sessionDirectory)
     {
-        var root = ResolveSessionDirectory(sessionDirectory);
-        var configPath = Path.Combine(root, ConfigPath);
-        var binlogPath = Path.Combine(root, "tdlib-db", "td.binlog");
+        var root = TelegramSession.ResolveSessionDirectory(sessionDirectory);
+        if (!Directory.Exists(root))
+            throw new ValidationException($"Session directory {root} was not found. Run `tgcli login` first.");
 
-        if (!File.Exists(configPath))
-        {
-            throw new ValidationException($"Session config was not found at {configPath}. Run `tgcli login` first.");
-        }
-
-        if (!File.Exists(binlogPath))
-        {
-            throw new ValidationException($"TDLib authorization state was not found at {binlogPath}. Run `tgcli login` first.");
-        }
-
-        EnsureSessionUnlocked(root);
+        using var lease = SessionLock.Acquire(root);
+        RecoverImport(root);
+        var config = ReadFile(Path.Combine(root, ConfigPath), MaxConfigBytes);
+        TelegramSession.ValidatePortableConfig(config);
+        var binlog = ReadFile(Path.Combine(root, BinlogPath), EntryLimit(BinlogPath));
 
         using var output = new MemoryStream();
         using (var archive = new ZipArchive(output, ZipArchiveMode.Create, leaveOpen: true))
         {
-            WriteTextEntry(archive, ManifestPath, JsonSerializer.Serialize(new Manifest(
-                Format,
-                FormatVersion,
-                DateTimeOffset.UtcNow,
-                "Contains only config.json and tdlib-db/td.binlog. It does not contain message history, media, downloads, thumbnails, exports, attachment indexes, app binaries, or lock files.")));
-            AddFile(archive, ConfigPath, configPath);
-            AddFile(archive, BinlogPath, binlogPath);
+            var manifest = new Manifest(Format, FormatVersion, DateTimeOffset.UtcNow,
+                "Contains only config.json and tdlib-db/td.binlog. It does not contain message history, media, downloads, thumbnails, exports, attachment indexes, app binaries, or lock files.");
+            AddEntry(archive, ManifestPath, JsonSerializer.SerializeToUtf8Bytes(manifest));
+            AddEntry(archive, ConfigPath, config);
+            AddEntry(archive, BinlogPath, binlog);
         }
 
-        return Convert.ToBase64String(output.ToArray());
+        return Convert.ToBase64String(output.GetBuffer(), 0, checked((int)output.Length));
     }
 
-    public static void Import(string secret, string? sessionDirectory, bool force)
+    public static void Import(string secret, string? sessionDirectory, bool force) =>
+        Import(secret, sessionDirectory, force, MoveEntry);
+
+    internal static void Import(string secret, string? sessionDirectory, bool force, Action<string, string> promote)
     {
-        var root = ResolveSessionDirectory(sessionDirectory);
+        var files = Inspect(secret);
+        var root = TelegramSession.ResolveSessionDirectory(sessionDirectory);
+        TelegramSession.CreatePrivateSessionDirectory(root);
+        using var lease = SessionLock.Acquire(root);
+        RecoverImport(root);
+
+        var existing = Directory.EnumerateFileSystemEntries(root)
+            .Where(path => Path.GetFileName(path) is not (SessionLock.LockName or SessionLock.OwnerName))
+            .Where(path => !Path.GetFileName(path).StartsWith(RetiredPrefix, StringComparison.Ordinal))
+            .ToArray();
+        if (existing.Length > 0 && !force)
+            throw new ValidationException($"Session directory {root} is not empty. Use --force to overwrite it.");
+
+        Install(root, existing, files, promote);
+    }
+
+    internal static string ReadInput(TextReader reader)
+    {
+        var secret = new StringBuilder();
+        var buffer = new char[8192];
+        int count;
+        while ((count = reader.Read(buffer)) != 0)
+        {
+            if (secret.Length + count > MaxInputChars)
+                throw new ValidationException("Session secret exceeds the size limit.");
+            secret.Append(buffer, 0, count);
+        }
+        return secret.ToString();
+    }
+
+    internal static Dictionary<string, byte[]> Inspect(string secret)
+    {
         var payload = Decode(secret);
-        var files = ReadSecret(payload);
-        ValidateImportTarget(root, force);
-        EnsureSessionUnlocked(root);
-
-        if (force && Directory.Exists(root))
+        try
         {
-            Directory.Delete(root, recursive: true);
+            ValidateZipDirectory(payload);
+            using var input = new MemoryStream(payload);
+            using var archive = new ZipArchive(input, ZipArchiveMode.Read);
+            if (archive.Entries.Count != 3)
+                throw new ValidationException("Session secret must contain exactly three ZIP entries.");
+
+            var entries = new Dictionary<string, ZipArchiveEntry>(StringComparer.Ordinal);
+            foreach (var entry in archive.Entries)
+            {
+                var limit = EntryLimit(entry.FullName);
+                if (limit == 0)
+                    throw new ValidationException("Session secret contains an unexpected ZIP entry.");
+                if (entry.Length <= 0 || entry.Length > limit)
+                    throw new ValidationException($"Session secret entry {entry.FullName} has an invalid size.");
+                if (!entries.TryAdd(entry.FullName, entry))
+                    throw new ValidationException("Session secret contains a duplicate ZIP entry.");
+            }
+
+            var manifestBytes = ReadEntry(entries[ManifestPath]);
+            var manifest = JsonSerializer.Deserialize<Manifest>(manifestBytes);
+            if (manifest?.Format != Format || manifest.Version != FormatVersion)
+                throw new ValidationException("Session secret has an unsupported format.");
+
+            var config = ReadEntry(entries[ConfigPath]);
+            TelegramSession.ValidatePortableConfig(config);
+            return new Dictionary<string, byte[]>(StringComparer.Ordinal)
+            {
+                [ManifestPath] = manifestBytes,
+                [ConfigPath] = config,
+                [BinlogPath] = ReadEntry(entries[BinlogPath])
+            };
         }
-
-        Directory.CreateDirectory(Path.Combine(root, "tdlib-db"));
-        File.WriteAllBytes(Path.Combine(root, ConfigPath), files[ConfigPath]);
-        File.WriteAllBytes(Path.Combine(root, "tdlib-db", "td.binlog"), files[BinlogPath]);
-        SetPrivatePermissions(root);
-    }
-
-    internal static Dictionary<string, byte[]> Inspect(string secret) => ReadSecret(Decode(secret));
-
-    internal static string ResolveSessionDirectory(string? sessionDirectory)
-    {
-        if (!string.IsNullOrWhiteSpace(sessionDirectory))
+        catch (Exception ex) when (ex is InvalidDataException or JsonException or EndOfStreamException)
         {
-            return Path.GetFullPath(sessionDirectory);
+            throw new ValidationException("Session secret is not a valid authorization archive.", ex);
         }
-
-        var home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
-        return string.IsNullOrWhiteSpace(home)
-            ? Path.Combine(Environment.CurrentDirectory, ".tgcli")
-            : Path.Combine(home, ".local", "share", "tgcli");
     }
 
     private static byte[] Decode(string secret)
     {
-        var normalized = new string(secret.Where(c => !char.IsWhiteSpace(c)).ToArray());
-        if (string.IsNullOrWhiteSpace(normalized))
+        if (secret.Length > MaxInputChars)
+            throw new ValidationException("Session secret exceeds the size limit.");
+        var encodedLength = 0;
+        var hasOtherWhitespace = false;
+        foreach (var character in secret)
         {
-            throw new ValidationException("Session secret is empty.");
+            if (!char.IsWhiteSpace(character)) encodedLength++;
+            else if (character is not (' ' or '\t' or '\r' or '\n')) hasOtherWhitespace = true;
         }
+        if (encodedLength == 0) throw new ValidationException("Session secret is empty.");
+        if (encodedLength > MaxEncodedChars) throw new ValidationException("Session secret exceeds the size limit.");
 
         try
         {
-            return Convert.FromBase64String(normalized);
+            if (hasOtherWhitespace) secret = string.Concat(secret.Where(character => !char.IsWhiteSpace(character)));
+            return Convert.FromBase64String(secret);
         }
         catch (FormatException ex)
         {
@@ -168,201 +218,160 @@ internal static class SessionSecret
         }
     }
 
-    private static Dictionary<string, byte[]> ReadSecret(byte[] payload)
+    private static void ValidateZipDirectory(ReadOnlySpan<byte> payload)
     {
-        using var input = new MemoryStream(payload);
-        using var archive = new ZipArchive(input, ZipArchiveMode.Read);
-        var files = archive.Entries.ToDictionary(x => NormalizeEntryPath(x.FullName), ReadEntry, StringComparer.Ordinal);
-        var allowed = new HashSet<string>([ManifestPath, ConfigPath, BinlogPath], StringComparer.Ordinal);
-        var unexpected = files.Keys.Where(x => !allowed.Contains(x)).Order(StringComparer.Ordinal).ToArray();
-        if (unexpected.Length > 0)
+        // Bound the directory before ZipArchive allocates entry objects. Our own exports use a plain, single-disk ZIP.
+        const int footerLength = 22;
+        var minimum = Math.Max(0, payload.Length - footerLength - ushort.MaxValue);
+        for (var offset = payload.Length - footerLength; offset >= minimum; offset--)
         {
-            throw new ValidationException($"Session secret contains unexpected file(s): {string.Join(", ", unexpected)}.");
+            var footer = payload[offset..];
+            if (BinaryPrimitives.ReadUInt32LittleEndian(footer) != 0x06054b50
+                || footer.Length != footerLength + BinaryPrimitives.ReadUInt16LittleEndian(footer[20..]))
+                continue;
+
+            var directorySize = BinaryPrimitives.ReadUInt32LittleEndian(footer[12..]);
+            var directoryOffset = BinaryPrimitives.ReadUInt32LittleEndian(footer[16..]);
+            if (BinaryPrimitives.ReadUInt32LittleEndian(footer[4..]) == 0
+                && BinaryPrimitives.ReadUInt16LittleEndian(footer[8..]) == 3
+                && BinaryPrimitives.ReadUInt16LittleEndian(footer[10..]) == 3
+                && directorySize <= 4096 && (long)directorySize + directoryOffset == offset)
+                return;
+            break;
         }
 
-        foreach (var required in allowed)
-        {
-            if (!files.ContainsKey(required))
-            {
-                throw new ValidationException($"Session secret is missing {required}.");
-            }
-        }
-
-        var manifest = JsonSerializer.Deserialize<Manifest>(Encoding.UTF8.GetString(files[ManifestPath]));
-        if (manifest?.Format != Format || manifest.Version != FormatVersion)
-        {
-            throw new ValidationException("Session secret has an unsupported format.");
-        }
-
-        return files;
+        throw new ValidationException("Session secret must be a single ZIP archive with exactly three entries.");
     }
 
-    private static void ValidateImportTarget(string root, bool force)
+    private static int EntryLimit(string name) => name switch
     {
-        if (!Directory.Exists(root))
-        {
-            return;
-        }
+        ManifestPath => 16 * 1024,
+        ConfigPath => MaxConfigBytes,
+        BinlogPath => 64 * 1024 * 1024,
+        _ => 0
+    };
 
-        var existing = Directory.EnumerateFileSystemEntries(root)
-            .Select(Path.GetFileName)
-            .Where(x => x is not null && x is not "tdlib.lock" and not "tdlib.lock.owner")
-            .ToArray();
-        if (existing.Length > 0 && !force)
-        {
-            throw new ValidationException($"Session directory {root} is not empty. Use --force to overwrite it.");
-        }
-    }
-
-    private static void EnsureSessionUnlocked(string root)
+    private static byte[] ReadFile(string path, int maxBytes)
     {
-        var status = SessionLock.Inspect(root);
-        if (status.locked)
-        {
-            throw new IOException(
-                $"TDLib database is locked by another tgcli process (owner PID: {status.owner ?? "unknown"}). Stop that process before exporting or importing the session secret.");
-        }
-    }
-
-    private static void AddFile(ZipArchive archive, string entryName, string path)
-    {
-        var entry = archive.CreateEntry(entryName, CompressionLevel.SmallestSize);
-        using var entryStream = entry.Open();
+        if (!File.Exists(path))
+            throw new ValidationException($"Session authorization file was not found at {path}. Run `tgcli login` first.");
         using var file = File.OpenRead(path);
-        file.CopyTo(entryStream);
-    }
-
-    private static void WriteTextEntry(ZipArchive archive, string entryName, string value)
-    {
-        var entry = archive.CreateEntry(entryName, CompressionLevel.SmallestSize);
-        using var writer = new StreamWriter(entry.Open(), new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
-        writer.Write(value);
+        if (file.Length <= 0 || file.Length > maxBytes)
+            throw new ValidationException($"Session authorization file at {path} has an invalid size.");
+        return ReadExact(file, (int)file.Length);
     }
 
     private static byte[] ReadEntry(ZipArchiveEntry entry)
     {
         using var stream = entry.Open();
-        using var output = new MemoryStream();
-        stream.CopyTo(output);
-        return output.ToArray();
+        return ReadExact(stream, checked((int)entry.Length));
     }
 
-    private static string NormalizeEntryPath(string value) => value.Replace('\\', '/').TrimStart('/');
-
-    private static void SetPrivatePermissions(string root)
+    private static byte[] ReadExact(Stream stream, int size)
     {
-        if (OperatingSystem.IsWindows())
-        {
-            return;
-        }
-
-        TryChmod(root, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
-        TryChmod(Path.Combine(root, "tdlib-db"), UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
-        TryChmod(Path.Combine(root, ConfigPath), UnixFileMode.UserRead | UnixFileMode.UserWrite);
-        TryChmod(Path.Combine(root, "tdlib-db", "td.binlog"), UnixFileMode.UserRead | UnixFileMode.UserWrite);
+        var bytes = new byte[size];
+        stream.ReadExactly(bytes);
+        if (stream.ReadByte() != -1)
+            throw new ValidationException("Session authorization data exceeded its declared size.");
+        return bytes;
     }
 
-    private static void TryChmod(string path, UnixFileMode mode)
+    private static void AddEntry(ZipArchive archive, string name, byte[] content)
     {
+        using var stream = archive.CreateEntry(name, CompressionLevel.SmallestSize).Open();
+        stream.Write(content);
+    }
+
+    private static void Install(string root, string[] existing, Dictionary<string, byte[]> files,
+        Action<string, string> promote)
+    {
+        var transaction = Path.Combine(root, TransactionName);
+        var staged = Path.Combine(transaction, "new");
+        var backup = Path.Combine(transaction, "backup");
+        TelegramSession.CreatePrivateSessionDirectory(transaction);
         try
         {
-            if (OperatingSystem.IsWindows())
-            {
-                return;
-            }
+            TelegramSession.CreatePrivateSessionDirectory(staged);
+            TelegramSession.CreatePrivateSessionDirectory(backup);
+            TelegramSession.CreatePrivateSessionDirectory(Path.Combine(staged, "tdlib-db"));
+            WritePrivate(Path.Combine(staged, ConfigPath), files[ConfigPath]);
+            WritePrivate(Path.Combine(staged, BinlogPath), files[BinlogPath]);
 
-            File.SetUnixFileMode(path, mode);
+            foreach (var path in existing)
+                MoveEntry(path, Path.Combine(backup, Path.GetFileName(path)));
+            WriteMarker(transaction, "promoting");
+            promote(Path.Combine(staged, ConfigPath), Path.Combine(root, ConfigPath));
+            promote(Path.Combine(staged, "tdlib-db"), Path.Combine(root, "tdlib-db"));
+            WriteMarker(transaction, "committed");
         }
-        catch
+        catch (Exception installError)
         {
-            // Permissions are best-effort on non-POSIX or restricted filesystems.
+            try { RecoverImport(root); }
+            catch (Exception recoveryError)
+            {
+                throw new IOException(
+                    $"Session replacement could not finish or roll back. The transaction was retained at {transaction}.",
+                    new AggregateException(installError, recoveryError));
+            }
+            throw;
         }
+
+        RecoverImport(root);
+    }
+
+    // All callers hold the session lease. The pathname of the coordination inode is never moved.
+    internal static void RecoverImport(string root)
+    {
+        var transaction = Path.Combine(root, TransactionName);
+        if (!Directory.Exists(transaction)) return;
+        var staged = Path.Combine(transaction, "new");
+        var backup = Path.Combine(transaction, "backup");
+        if (!File.Exists(Path.Combine(transaction, "committed")))
+        {
+            if (File.Exists(Path.Combine(transaction, "promoting")))
+            {
+                foreach (var entry in new[] { ConfigPath, "tdlib-db" })
+                {
+                    var original = Path.Combine(staged, entry);
+                    if (!File.Exists(original) && !Directory.Exists(original))
+                        MoveEntry(Path.Combine(root, entry), original);
+                }
+            }
+            if (Directory.Exists(backup))
+                foreach (var existing in Directory.EnumerateFileSystemEntries(backup))
+                    MoveEntry(existing, Path.Combine(root, Path.GetFileName(existing)));
+        }
+
+        var retired = Path.Combine(root, RetiredPrefix + Guid.NewGuid().ToString("N"));
+        Directory.Move(transaction, retired);
+        try { Directory.Delete(retired, recursive: true); }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            Console.Error.WriteLine($"Could not remove private session import files at {retired}.");
+        }
+    }
+
+    private static void MoveEntry(string source, string target)
+    {
+        if ((File.GetAttributes(source) & FileAttributes.Directory) != 0) Directory.Move(source, target);
+        else File.Move(source, target);
+    }
+
+    private static void WriteMarker(string transaction, string name)
+    {
+        var pending = Path.Combine(transaction, name + ".pending");
+        WritePrivate(pending, []);
+        File.Move(pending, Path.Combine(transaction, name));
+    }
+
+    private static void WritePrivate(string path, byte[] content)
+    {
+        var options = new FileStreamOptions { Mode = FileMode.CreateNew, Access = FileAccess.Write };
+        if (!OperatingSystem.IsWindows()) options.UnixCreateMode = UnixFileMode.UserRead | UnixFileMode.UserWrite;
+        using var file = new FileStream(path, options);
+        file.Write(content);
+        file.Flush(flushToDisk: true);
     }
 
     private sealed record Manifest(string Format, int Version, DateTimeOffset CreatedAt, string Contents);
-}
-
-internal sealed record SessionLockStatus(
-    string session_directory,
-    bool locked,
-    string? owner,
-    bool owner_metadata_stale,
-    string lock_path);
-
-internal static class SessionLock
-{
-    public static SessionLockStatus Inspect(string? sessionDirectory)
-    {
-        var root = SessionSecret.ResolveSessionDirectory(sessionDirectory);
-        var lockPath = Path.Combine(root, "tdlib.lock");
-        var ownerPath = lockPath + ".owner";
-        var owner = ReadOwner(ownerPath);
-        var locked = false;
-
-        if (File.Exists(lockPath))
-        {
-            try
-            {
-                using var stream = new FileStream(lockPath, FileMode.Open, FileAccess.ReadWrite, FileShare.None);
-            }
-            catch (IOException)
-            {
-                locked = true;
-            }
-        }
-
-        return new SessionLockStatus(
-            root,
-            locked,
-            owner,
-            !locked && !string.IsNullOrWhiteSpace(owner),
-            lockPath);
-    }
-
-    public static SessionLockStatus RepairStale(string? sessionDirectory)
-    {
-        var root = SessionSecret.ResolveSessionDirectory(sessionDirectory);
-        if (!Directory.Exists(root))
-        {
-            return Inspect(root);
-        }
-
-        var lockPath = Path.Combine(root, "tdlib.lock");
-        var ownerPath = lockPath + ".owner";
-        try
-        {
-            using var stream = new FileStream(lockPath, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
-            if (File.Exists(ownerPath))
-            {
-                File.Delete(ownerPath);
-            }
-        }
-        catch (IOException ex)
-        {
-            var owner = ReadOwner(ownerPath);
-            throw new IOException(
-                $"Refusing to repair an active TDLib lock owned by PID {owner ?? "unknown"}.",
-                ex);
-        }
-
-        return Inspect(root);
-    }
-
-    private static string? ReadOwner(string ownerPath)
-    {
-        try
-        {
-            if (!File.Exists(ownerPath))
-            {
-                return null;
-            }
-
-            var owner = File.ReadAllText(ownerPath).Trim();
-            return owner.Length == 0 ? null : owner;
-        }
-        catch
-        {
-            return null;
-        }
-    }
 }

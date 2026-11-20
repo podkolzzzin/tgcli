@@ -8,8 +8,7 @@ namespace TgCli;
 internal sealed class TelegramSession : IAsyncDisposable
 {
     private readonly SessionConfig _config;
-    private FileStream? _lockStream;
-    private string? _lockOwnerPath;
+    private SessionLockLease? _lease;
     private TdApi.AuthorizationState? _authorizationState;
     private TaskCompletionSource<TdApi.AuthorizationState> _authorizationChanged = NewAuthorizationChangedSource();
     private readonly TelegramConnection _connection = new();
@@ -31,18 +30,22 @@ internal sealed class TelegramSession : IAsyncDisposable
     public Task EnsureConnectedAsync(CancellationToken cancellationToken = default) =>
         _connection.WaitReadyAsync(TimeSpan.FromSeconds(30), cancellationToken);
 
-    internal static string ResolveSessionDirectory(string? path) => Path.GetFullPath(path ?? SessionConfig.DefaultRootDirectory());
+    internal static string ResolveSessionDirectory(string? path) =>
+        Path.GetFullPath(string.IsNullOrWhiteSpace(path) ? SessionConfig.DefaultRootDirectory() : path);
 
     public static async Task<TelegramSession> CreateAsync(string? sessionDirectory, int apiId, string? apiHash, bool saveConfig, int lockTimeout = 30, bool noWait = false)
     {
-        var config = SessionConfig.Load(sessionDirectory);
-        config.ApplyOverrides(apiId, apiHash);
-        config.Validate();
-        config.EnsureDirectories();
-        var acquiredLock = await AcquireLockAsync(config, TimeSpan.FromSeconds(noWait ? 0 : Math.Max(0, lockTimeout)));
+        var root = ResolveSessionDirectory(sessionDirectory);
+        SessionConfig.CreatePrivateDirectory(root);
+        var acquiredLock = await SessionLock.AcquireAsync(root, TimeSpan.FromSeconds(noWait ? 0 : Math.Max(0, lockTimeout)));
         TelegramSession? session = null;
         try
         {
+            SessionSecret.RecoverImport(root);
+            var config = SessionConfig.Load(root);
+            config.ApplyOverrides(apiId, apiHash);
+            config.Validate();
+            config.EnsureDirectories();
             if (saveConfig)
             {
                 config.Save();
@@ -51,8 +54,7 @@ internal sealed class TelegramSession : IAsyncDisposable
             DisableTdLibLogging();
             session = new TelegramSession(new TdClient(), config)
             {
-                _lockStream = acquiredLock.Stream,
-                _lockOwnerPath = acquiredLock.OwnerPath
+                _lease = acquiredLock
             };
             await session.InitializeAsync();
             return session;
@@ -65,8 +67,7 @@ internal sealed class TelegramSession : IAsyncDisposable
             }
             else
             {
-                await acquiredLock.Stream.DisposeAsync();
-                DeleteOwnedLockMetadata(acquiredLock.OwnerPath);
+                acquiredLock.Dispose();
             }
 
             throw;
@@ -208,8 +209,7 @@ internal sealed class TelegramSession : IAsyncDisposable
     private async Task CloseAndReleaseAsync()
     {
         await Task.Run(Client.Dispose);
-        await (_lockStream?.DisposeAsync() ?? ValueTask.CompletedTask);
-        if (_lockOwnerPath is not null) DeleteOwnedLockMetadata(_lockOwnerPath);
+        _lease?.Dispose();
     }
 
     private async Task InitializeAsync()
@@ -318,58 +318,6 @@ internal sealed class TelegramSession : IAsyncDisposable
         };
     }
 
-    private static async Task<AcquiredSessionLock> AcquireLockAsync(SessionConfig config, TimeSpan timeout)
-    {
-        var lockPath = Path.Combine(config.RootDirectory, "tdlib.lock");
-        var ownerPath = lockPath + ".owner";
-        var deadline = DateTimeOffset.UtcNow + timeout;
-        Exception? lastError = null;
-
-        while (true)
-        {
-            try
-            {
-                var stream = new FileStream(lockPath, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
-                stream.SetLength(0);
-                await using var writer = new StreamWriter(stream, leaveOpen: true);
-                await writer.WriteAsync(Environment.ProcessId.ToString(System.Globalization.CultureInfo.InvariantCulture));
-                await writer.FlushAsync();
-                stream.Position = 0;
-                File.WriteAllText(ownerPath, Environment.ProcessId.ToString(System.Globalization.CultureInfo.InvariantCulture));
-                return new AcquiredSessionLock(stream, ownerPath);
-            }
-            catch (IOException ex)
-            {
-                lastError = ex;
-                if (DateTimeOffset.UtcNow >= deadline)
-                {
-                    var owner = File.Exists(ownerPath) ? File.ReadAllText(ownerPath).Trim() : "unknown";
-                    throw new IOException($"TDLib database is locked by another tgcli process (owner PID: {owner}). Use --lock-timeout to wait longer or --no-wait to fail immediately.", ex);
-                }
-
-                await Task.Delay(TimeSpan.FromMilliseconds(250));
-            }
-        }
-    }
-
-    private static void DeleteOwnedLockMetadata(string ownerPath)
-    {
-        try
-        {
-            if (File.Exists(ownerPath)
-                && File.ReadAllText(ownerPath).Trim() == Environment.ProcessId.ToString(System.Globalization.CultureInfo.InvariantCulture))
-            {
-                File.Delete(ownerPath);
-            }
-        }
-        catch
-        {
-            // Lock metadata is diagnostic only; OS-level file ownership remains authoritative.
-        }
-    }
-
-    private sealed record AcquiredSessionLock(FileStream Stream, string OwnerPath);
-
     private async Task WaitForAuthorizationChangeAsync(
         TdApi.AuthorizationState previousState,
         TimeSpan? timeout = null)
@@ -417,7 +365,8 @@ internal sealed class TelegramSession : IAsyncDisposable
         while (true)
         {
             Console.Write($"{label}: ");
-            var value = Console.ReadLine() ?? string.Empty;
+            var value = Console.ReadLine()
+                ?? throw new ValidationException("Telegram login requires input, but stdin ended. Run `tgcli login` with the required input.");
             if (allowEmpty || !string.IsNullOrWhiteSpace(value))
             {
                 return value.Trim();
@@ -428,6 +377,13 @@ internal sealed class TelegramSession : IAsyncDisposable
     private static string PromptSecret(string label)
     {
         Console.Write($"{label}: ");
+        if (Console.IsInputRedirected)
+        {
+            // Preserve the supplied password exactly and never print it.
+            return Console.ReadLine()
+                ?? throw new ValidationException("Telegram login requires a password, but stdin ended.");
+        }
+
         var result = new List<char>();
 
         while (true)
@@ -456,6 +412,14 @@ internal sealed class TelegramSession : IAsyncDisposable
         }
     }
 
+    internal static void ValidatePortableConfig(byte[] bytes)
+    {
+        var stored = SessionConfig.ParseStoredConfig(bytes);
+        new SessionConfig { ApiId = stored.ApiId, ApiHash = stored.ApiHash }.Validate();
+    }
+
+    internal static void CreatePrivateSessionDirectory(string path) => SessionConfig.CreatePrivateDirectory(path);
+
     private sealed class SessionConfig
     {
         public int ApiId { get; set; }
@@ -467,7 +431,7 @@ internal sealed class TelegramSession : IAsyncDisposable
 
         public static SessionConfig Load(string? sessionDirectory)
         {
-            var root = Path.GetFullPath(sessionDirectory ?? DefaultRootDirectory());
+            var root = ResolveSessionDirectory(sessionDirectory);
             var config = new SessionConfig { RootDirectory = root };
 
             config.LoadFromFile(SystemConfigPath());
@@ -532,13 +496,20 @@ internal sealed class TelegramSession : IAsyncDisposable
                 return;
             }
 
-            var loaded = JsonSerializer.Deserialize<StoredConfig>(File.ReadAllText(configPath));
-            if (loaded?.ApiId > 0)
+            using var stream = File.OpenRead(configPath);
+            if (stream.Length > SessionSecret.MaxConfigBytes)
+                throw new ValidationException("Telegram session config exceeds the size limit.");
+            var bytes = new byte[stream.Length];
+            stream.ReadExactly(bytes);
+            if (stream.ReadByte() != -1)
+                throw new ValidationException("Telegram session config changed while being read.");
+            var loaded = ParseStoredConfig(bytes);
+            if (loaded.ApiId > 0)
             {
                 ApiId = loaded.ApiId;
             }
 
-            if (!string.IsNullOrWhiteSpace(loaded?.ApiHash))
+            if (!string.IsNullOrWhiteSpace(loaded.ApiHash))
             {
                 ApiHash = loaded.ApiHash;
             }
@@ -571,9 +542,12 @@ internal sealed class TelegramSession : IAsyncDisposable
             return Path.Combine(Path.DirectorySeparatorChar.ToString(), "etc", "tgcli", "config.json");
         }
 
-        private static void CreatePrivateDirectory(string path)
+        internal static void CreatePrivateDirectory(string path)
         {
-            Directory.CreateDirectory(path);
+            if (OperatingSystem.IsWindows())
+                Directory.CreateDirectory(path);
+            else
+                Directory.CreateDirectory(path, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
             SetPrivateDirectoryMode(path);
         }
 
@@ -611,6 +585,42 @@ internal sealed class TelegramSession : IAsyncDisposable
             }
         }
 
-        private sealed record StoredConfig(int ApiId, string ApiHash);
+        internal static StoredConfig ParseStoredConfig(ReadOnlyMemory<byte> bytes)
+        {
+            ReadOnlyMemory<byte> bom = new byte[] { 0xef, 0xbb, 0xbf };
+            if (bytes.Span.StartsWith(bom.Span)) bytes = bytes[bom.Length..];
+            try
+            {
+                using var json = JsonDocument.Parse(bytes);
+                if (json.RootElement.ValueKind != JsonValueKind.Object)
+                    throw new ValidationException("Telegram session config must be a JSON object.");
+
+                int? apiId = null;
+                string? apiHash = null;
+                foreach (var field in json.RootElement.EnumerateObject())
+                {
+                    if (field.Name.Equals("ApiId", StringComparison.OrdinalIgnoreCase))
+                    {
+                        if (apiId is not null || field.Value.ValueKind != JsonValueKind.Number || !field.Value.TryGetInt32(out var id))
+                            throw new ValidationException("Telegram session config has an invalid or duplicate API ID.");
+                        apiId = id;
+                    }
+                    else if (field.Name.Equals("ApiHash", StringComparison.OrdinalIgnoreCase))
+                    {
+                        if (apiHash is not null || field.Value.ValueKind != JsonValueKind.String)
+                            throw new ValidationException("Telegram session config has an invalid or duplicate API hash.");
+                        apiHash = field.Value.GetString()!.Trim();
+                    }
+                }
+
+                return new StoredConfig(apiId ?? 0, apiHash ?? string.Empty);
+            }
+            catch (JsonException ex)
+            {
+                throw new ValidationException("Telegram session config is not valid JSON.", ex);
+            }
+        }
+
+        internal sealed record StoredConfig(int ApiId, string ApiHash);
     }
 }
