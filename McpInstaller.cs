@@ -25,28 +25,9 @@ internal sealed class McpProcessRunner : IMcpProcessRunner
             start.Arguments = BuildWindowsCmdArguments(executable, arguments);
         }
         else foreach (var argument in arguments) start.ArgumentList.Add(argument);
-        using var process = Process.Start(start) ?? throw new IOException("Could not start MCP configuration command.");
-        process.StandardInput.Close();
-        var output = process.StandardOutput.BaseStream.CopyToAsync(Stream.Null, cancellationToken);
-        var error = process.StandardError.BaseStream.CopyToAsync(Stream.Null, cancellationToken);
-        try
-        {
-            await process.WaitForExitAsync(cancellationToken);
-            await Task.WhenAll(output, error);
-            return process.ExitCode;
-        }
-        catch
-        {
-            try
-            {
-                if (!process.HasExited) process.Kill(entireProcessTree: true);
-            }
-            catch (InvalidOperationException) when (process.HasExited) { }
-            await process.WaitForExitAsync(CancellationToken.None);
-            try { await Task.WhenAll(output, error); }
-            catch (Exception ex) when (ex is IOException or OperationCanceledException) { }
-            throw;
-        }
+        // Native clients must finish config writes before exiting. Linux also supervises descendants
+        // in the launch group. Other platforms can only attempt cleanup of the visible process tree.
+        return await MediaProcess.RunRegistrationAsync(start, cancellationToken);
     }
 
     internal static string BuildWindowsCmdArguments(string executable, IReadOnlyList<string> arguments)
@@ -143,21 +124,20 @@ internal sealed class McpInstaller(IMcpProcessRunner runner)
 
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(token);
         timeout.CancelAfter(TimeSpan.FromSeconds(30));
-        var timedOut = false;
         try
         {
             var exitCode = await runner.RunAsync(target.Cli!, args, timeout.Token);
             if (exitCode != 0)
                 throw new IOException($"Client MCP registration exited with code {exitCode}. Check its MCP settings and supported CLI version.");
         }
-        catch (OperationCanceledException) when (!token.IsCancellationRequested) { timedOut = true; }
+        catch (OperationCanceledException) when (!token.IsCancellationRequested)
+        {
+            throw new TimeoutException("Client configuration command timed out. Registration may have changed the configuration. Review the saved MCP settings before retrying.");
+        }
 
         var saved = await McpConfiguration.ReadAsync(path, target.Format, token);
         if (saved is null || !launch.Matches(McpConfiguration.ReadEntry(saved, target.Format, target.RootKey)))
-        {
-            if (timedOut) throw new TimeoutException("Client configuration command timed out; the expected entry was not saved.");
             throw new IOException("Client configuration verification failed: the expected tgcli entry was not persisted at this path.");
-        }
         if (original is not null && !McpConfiguration.PreservesSettings(original, saved, target.Format))
             throw new IOException("Client configuration verification failed: unrelated saved settings changed. Review the private backup before retrying.");
     }

@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Diagnostics.CodeAnalysis;
 using System.Runtime.InteropServices;
 using System.Text;
 using Newtonsoft.Json.Linq;
@@ -172,28 +173,47 @@ internal static class MediaProcess
     private const string ChildArgument = "--tgcli-internal-media-child";
     private const string GroupReady = "tgcli-media-group-ready";
     private const string StartChild = "start";
+    private const string StartRegistration = "start-registration";
+    private const int SigKill = 9;
+    private const int PrSetChildSubreaper = 36;
+    private const int Interrupted = 4; // EINTR
+    private const int NoChildProcesses = 10; // ECHILD
     private static readonly TimeSpan StartupTimeout = TimeSpan.FromSeconds(5);
     private static readonly TimeSpan PipeExitTimeout = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan ShutdownTimeout = TimeSpan.FromSeconds(2);
 
-    public static async Task<(int ExitCode, string Output, string Error)> RunAsync(
-        ProcessStartInfo info, CancellationToken cancellationToken, bool superviseExternal = false)
+    public static Task<(int ExitCode, string Output, string Error)> RunAsync(
+        ProcessStartInfo info, CancellationToken cancellationToken, bool superviseExternal = false) =>
+        RunAsync(info, cancellationToken, superviseExternal, registration: false);
+
+    internal static async Task<int> RunRegistrationAsync(ProcessStartInfo info, CancellationToken cancellationToken) =>
+        (await RunAsync(info, cancellationToken, superviseExternal: true, registration: true)).ExitCode;
+
+    private static async Task<(int ExitCode, string Output, string Error)> RunAsync(
+        ProcessStartInfo info, CancellationToken cancellationToken, bool superviseExternal, bool registration)
     {
         cancellationToken.ThrowIfCancellationRequested();
         var supervised = superviseExternal && OperatingSystem.IsLinux();
         var launch = supervised ? ChildStartInfo(info) : info;
         using var process = Process.Start(launch) ?? throw new InvalidOperationException($"Unable to start '{info.FileName}'.");
+        using var lifetime = supervised && registration ? process.StandardInput : null;
+        using var outputReader = process.StandardOutput;
+        using var errorReader = process.StandardError;
         var ownedGroup = 0;
         var stopped = 0;
         void StopOnce()
         {
-            if (Interlocked.Exchange(ref stopped, 1) == 0)
+            if (Interlocked.Exchange(ref stopped, 1) != 0)
+                return;
+            if (lifetime is not null)
+                lifetime.Close();
+            else
                 Stop(process, Volatile.Read(ref ownedGroup));
         }
 
-        using var registration = cancellationToken.Register(StopOnce);
+        using var cancellation = lifetime is null ? cancellationToken.Register(StopOnce) : default;
         using var pipeCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        var error = DrainAsync(process.StandardError, MaximumErrorCharacters, pipeCancellation.Token);
+        var error = DrainAsync(errorReader, registration ? 0 : MaximumErrorCharacters, pipeCancellation.Token);
         Task drains = error;
         Task<(string Text, bool Truncated)> output;
         try
@@ -201,18 +221,19 @@ internal static class MediaProcess
             if (supervised)
             {
                 // The child confirms the new group and waits for our acknowledgment before running external code.
-                var ready = await process.StandardOutput.ReadLineAsync(pipeCancellation.Token).AsTask()
+                var ready = await outputReader.ReadLineAsync(pipeCancellation.Token).AsTask()
                     .WaitAsync(StartupTimeout, cancellationToken);
                 if (ready != GroupReady || GetProcessGroup(process.Id) != process.Id)
-                    throw new InvalidOperationException("The media supervisor could not establish an owned Linux process group.");
+                    throw new InvalidOperationException("The supervisor could not establish an owned Linux process group.");
 
                 Volatile.Write(ref ownedGroup, process.Id);
                 cancellationToken.ThrowIfCancellationRequested();
-                process.StandardInput.WriteLine(StartChild);
-                process.StandardInput.Close();
+                process.StandardInput.WriteLine(lifetime is null ? StartChild : StartRegistration);
             }
+            if (lifetime is null && (supervised || registration))
+                process.StandardInput.Close();
 
-            output = DrainAsync(process.StandardOutput, MaximumOutputCharacters, pipeCancellation.Token);
+            output = DrainAsync(outputReader, registration ? 0 : MaximumOutputCharacters, pipeCancellation.Token);
             drains = Task.WhenAll(output, error);
             await process.WaitForExitAsync(cancellationToken);
             try
@@ -221,6 +242,8 @@ internal static class MediaProcess
             }
             catch (TimeoutException ex)
             {
+                if (registration)
+                    throw new IOException("The client launcher exited while a descendant held its output pipes open. Registration may have changed the configuration. Use a client launcher that waits for its child processes.", ex);
                 var detail = supervised
                     ? "The media executable exited while a descendant held its output pipes open."
                     : "The media executable exited with an unowned descendant holding its output pipes open. Descendant cleanup could not be verified.";
@@ -254,6 +277,7 @@ internal static class MediaProcess
             standardError.Truncated ? standardError.Text + "\n[stderr truncated]" : standardError.Text);
     }
 
+    [UnconditionalSuppressMessage("SingleFile", "IL3000", Justification = "Bundled assemblies have no location, so this intentionally falls back to the current executable.")]
     private static ProcessStartInfo ChildStartInfo(ProcessStartInfo info)
     {
         if (!string.IsNullOrEmpty(info.Arguments))
@@ -314,16 +338,41 @@ internal static class MediaProcess
 
         Console.Out.WriteLine(GroupReady);
         Console.Out.Flush();
-        if (Console.In.ReadLine() != StartChild)
+        var instruction = Console.In.ReadLine();
+        if (instruction is not (StartChild or StartRegistration))
             return true;
+        var registration = instruction == StartRegistration;
+        if (registration && SetSubreaper(PrSetChildSubreaper, 1, 0, 0, 0) < 0)
+        {
+            Console.Error.WriteLine("Could not track client registration descendants.");
+            return true;
+        }
 
         try
         {
-            var launch = new ProcessStartInfo(args[1]) { UseShellExecute = false, CreateNoWindow = true };
+            var launch = new ProcessStartInfo(args[1]) { UseShellExecute = false, CreateNoWindow = true, RedirectStandardInput = registration };
             foreach (var argument in args.AsSpan(2))
                 launch.ArgumentList.Add(argument);
             using var process = Process.Start(launch) ?? throw new InvalidOperationException($"Unable to start '{args[1]}'.");
+            if (registration)
+            {
+                // EOF also releases the lease when the outer CLI exits before async cancellation finishes.
+                // Signal our own group so we cannot hit a reused group ID after the supervisor exits.
+                new Thread(() =>
+                {
+                    try { Console.In.Read(); }
+                    finally { _ = Signal(0, SigKill); }
+                }) { IsBackground = true }.Start();
+                process.StandardInput.Close();
+            }
             process.WaitForExit();
+            if (registration)
+            {
+                // Orphans are reparented here even when they close all inherited output descriptors.
+                while (WaitForChild(-1, out _, 0) > 0 || Marshal.GetLastPInvokeError() == Interrupted) { }
+                if (Marshal.GetLastPInvokeError() != NoChildProcesses)
+                    _ = Signal(0, SigKill);
+            }
             Environment.ExitCode = process.ExitCode;
         }
         catch (Exception ex) when (ex is System.ComponentModel.Win32Exception or InvalidOperationException)
@@ -336,6 +385,12 @@ internal static class MediaProcess
 
     private static async Task<(string Text, bool Truncated)> DrainAsync(StreamReader reader, int limit, CancellationToken cancellationToken)
     {
+        if (limit == 0)
+        {
+            await reader.BaseStream.CopyToAsync(Stream.Null, cancellationToken);
+            return ("", false);
+        }
+
         var builder = new StringBuilder();
         var buffer = new char[4096];
         var truncated = false;
@@ -353,7 +408,7 @@ internal static class MediaProcess
     private static void Stop(Process process, int processGroup)
     {
         if (processGroup > 0)
-            _ = Signal(-processGroup, 9); // SIGKILL includes children after the supervised launcher exits.
+            _ = Signal(-processGroup, SigKill); // Includes children after the supervised launcher exits.
 
         try { process.Kill(entireProcessTree: true); }
         catch (Exception ex) when (ex is InvalidOperationException or System.ComponentModel.Win32Exception) { }
@@ -367,4 +422,10 @@ internal static class MediaProcess
 
     [DllImport("libc", EntryPoint = "kill")]
     private static extern int Signal(int processOrGroup, int signal);
+
+    [DllImport("libc", EntryPoint = "prctl", SetLastError = true)]
+    private static extern int SetSubreaper(int option, nuint value, nuint unused3, nuint unused4, nuint unused5);
+
+    [DllImport("libc", EntryPoint = "waitpid", SetLastError = true)]
+    private static extern int WaitForChild(int processId, out int status, int options);
 }
