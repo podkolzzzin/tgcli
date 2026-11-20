@@ -68,13 +68,13 @@ public sealed class MediaFlowTests
     [InlineData("video", "file")]
     [InlineData("voice", "voice-note")]
     [InlineData(null, "all")]
-    public void BatchRejectsRequestsThatCanShareOneDestination(string? first, string second)
+    public void BatchKeepsOriginalRowsForEquivalentAttachmentSelectors(string? first, string second)
     {
         var firstType = first is null ? "" : $",\"type\":\"{first}\"";
         using var reader = new StringReader(
             $"{{\"chat_id\":1,\"message_id\":2{firstType}}}\n" +
             $"{{\"chat_id\":1,\"message_id\":2,\"type\":\"{second}\"}}");
-        Assert.Throws<ValidationException>(() => BatchDownloads.Read(reader, null));
+        Assert.Equal(new[] { 0, 1 }, BatchDownloads.Read(reader, null).Select(item => item.Index));
     }
 
     [Fact]

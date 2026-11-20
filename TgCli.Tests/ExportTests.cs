@@ -371,7 +371,7 @@ public sealed class ExportTests
     }
 
     [Fact]
-    public void BatchDownloadRejectsDuplicateMessages()
+    public void BatchDownloadPreservesDuplicateInputRows()
     {
         using var reader = new StringReader(
             """
@@ -379,8 +379,7 @@ public sealed class ExportTests
             {"chat_id":1,"message_id":2}
             """);
 
-        Assert.Throws<System.ComponentModel.DataAnnotations.ValidationException>(
-            () => BatchDownloads.Read(reader, defaultType: null));
+        Assert.Equal(2, BatchDownloads.Read(reader, defaultType: null).Count);
     }
 
     [Fact]
@@ -395,7 +394,7 @@ public sealed class ExportTests
 
         var destination = BatchDownloads.ResolveDestination("/tmp/output", request, file);
 
-        Assert.Equal(Path.GetFullPath("/tmp/output/-1001_2097152_video.mp4"), destination);
+        Assert.Equal(Path.GetFullPath("/tmp/output/-1001_2097152_i1254_video.mp4"), destination);
     }
 
     [Theory]

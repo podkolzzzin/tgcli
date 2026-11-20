@@ -1,6 +1,8 @@
 #nullable enable
 
 using System;
+using System.Collections.Concurrent;
+using System.Linq;
 using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
@@ -106,6 +108,59 @@ public sealed class BatchRecoveryTests
         }
     }
 
+    [Fact]
+    public async Task EquivalentSelectorsShareOneDownloadAndExactAttachmentsKeepDistinctReceipts()
+    {
+        var workspace = Directory.CreateTempSubdirectory("tgcli-media-multi-");
+        try
+        {
+            var output = workspace.CreateSubdirectory("out").FullName;
+            using var input = new StringReader("""
+                {"chat_id":"1001","message_id":"1048576","type":"document"}
+                {"chat_id":"1001","message_id":"1048576","type":"doc"}
+                {"chat_id":"1001","message_id":"1048576","file_id":"10"}
+                {"chat_id":"1001","message_id":"1048576","attachment_id":"11"}
+                {"chat_id":"1001","message_id":"2097152","type":"video"}
+                """);
+            var requests = BatchDownloads.Read(input, null);
+            var primary = MakeFile(workspace.CreateSubdirectory("first"), 10, "document bytes");
+            var thumbnail = MakeFile(workspace.CreateSubdirectory("second"), 11, "thumbnail bytes");
+            var calls = new ConcurrentDictionary<int, int>();
+            Task<TdApi.File> Resolve(BatchDownloadRequest request, CancellationToken token)
+            {
+                if (request.MessageId == 2097152)
+                    throw new IOException("Synthetic inaccessible message.");
+                return Task.FromResult(request.AttachmentId == "11" ? thumbnail : primary);
+            }
+
+            var ct = TestContext.Current.CancellationToken;
+            var result = await BatchDownloads.RunAsync(requests, output, 4, Resolve, (_, file, _) =>
+            {
+                calls.AddOrUpdate(file.Id, 1, (_, count) => count + 1);
+                return Task.FromResult(file);
+            }, ct);
+            Assert.Equal(new[] { 0, 1, 2, 3, 4 }, result.Select(item => item.Index));
+            Assert.All(result.Take(4), item => Assert.True(item.Ok, item.Error));
+            Assert.False(result[4].Ok);
+            Assert.Equal(result[0].Path, result[1].Path);
+            Assert.Equal(result[0].Path, result[2].Path);
+            Assert.NotEqual(result[0].Path, result[3].Path);
+            Assert.Equal("document bytes", File.ReadAllText(result[0].Path!));
+            Assert.Equal("thumbnail bytes", File.ReadAllText(result[3].Path!));
+            Assert.Equal(1, calls[10]);
+            Assert.Equal(1, calls[11]);
+
+            var retry = await BatchDownloads.RunAsync(requests, output, 4, Resolve,
+                (_, _, _) => throw new IOException("Expected verified reuse."), ct);
+            Assert.All(retry.Take(4), item => Assert.Equal("skipped", item.Status));
+            Assert.Equal(result[3].Path, retry[3].Path);
+        }
+        finally
+        {
+            workspace.Delete(true);
+        }
+    }
+
     private static TdApi.File MakeFile(DirectoryInfo directory, int id, string content)
     {
         var source = Path.Combine(directory.FullName, "video.mp4");
@@ -114,7 +169,7 @@ public sealed class BatchRecoveryTests
         {
             Id = id,
             Size = new FileInfo(source).Length,
-            Remote = new() { Id = "synthetic-remote", UniqueId = "synthetic-unique" },
+            Remote = new() { Id = $"synthetic-remote-{id}", UniqueId = $"synthetic-unique-{id}" },
             Local = new() { Path = source, IsDownloadingCompleted = true }
         };
     }

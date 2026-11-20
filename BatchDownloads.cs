@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.ComponentModel.DataAnnotations;
 using System.Globalization;
 using System.Security.Cryptography;
@@ -62,21 +63,12 @@ internal static class BatchDownloads
             var chatId = ReadRequiredInt64(value, "chat_id", lineNumber);
             var messageId = ReadRequiredInt64(value, "message_id", lineNumber);
             var rowType = ReadOptionalText(value, "type", lineNumber);
-            var attachmentId = ReadOptionalText(value, "attachment_id", lineNumber, allowInteger: true);
-            var fileId = ReadOptionalText(value, "file_id", lineNumber, allowInteger: true);
+            var attachmentId = NormalizeAttachmentId(ReadOptionalText(value, "attachment_id", lineNumber, allowInteger: true));
+            var fileId = NormalizeAttachmentId(ReadOptionalText(value, "file_id", lineNumber, allowInteger: true));
             if (attachmentId is not null && fileId is not null && attachmentId != fileId)
                 throw new ValidationException($"Batch input line {lineNumber} has conflicting attachment identifiers.");
             attachmentId ??= fileId;
-            var type = string.IsNullOrWhiteSpace(defaultType) ? rowType : defaultType;
-            if (string.IsNullOrWhiteSpace(type))
-            {
-                type = null;
-            }
-            else
-            {
-                type = AttachmentKinds.CanonicalName(AttachmentKinds.Parse(type, allowThumbnail: true));
-            }
-
+            var type = NormalizeType(string.IsNullOrWhiteSpace(defaultType) ? rowType : defaultType);
             AttachmentDownloads.Validate(type, attachmentId, chatId, messageId);
             requests.Add(new BatchDownloadRequest(requests.Count, chatId, messageId, type, attachmentId));
         }
@@ -84,15 +76,6 @@ internal static class BatchDownloads
         if (requests.Count == 0)
         {
             throw new ValidationException("Batch input contains no download records.");
-        }
-
-        var duplicate = requests
-            .GroupBy(x => (x.ChatId, x.MessageId))
-            .FirstOrDefault(x => x.Count() > 1);
-        if (duplicate is not null)
-        {
-            throw new ValidationException(
-                $"Batch input contains duplicate record {duplicate.Key.ChatId}/{duplicate.Key.MessageId}; use one attachment selector per message.");
         }
 
         return requests;
@@ -118,18 +101,24 @@ internal static class BatchDownloads
         }
 
         var results = new BatchDownloadResult[requests.Count];
+        var downloads = new ConcurrentDictionary<string, Lazy<Task<BatchDownloadResult>>>(StringComparer.Ordinal);
+        var selections = requests.GroupBy(request => (request.ChatId, request.MessageId,
+            Type: NormalizeType(request.Type), Attachment: NormalizeAttachmentId(request.AttachmentId)));
         try
         {
             await Parallel.ForEachAsync(
-                requests,
+                selections,
                 new ParallelOptions
                 {
                     MaxDegreeOfParallelism = ValidateParallelism(parallel),
                     CancellationToken = cancellationToken
                 },
-                async (request, token) =>
+                async (selection, token) =>
                 {
-                    results[request.Index] = await RunItemAsync(request, outputDirectory, receiptsDirectory, resolve, complete, token);
+                    var request = selection.First();
+                    var result = await RunSelectionAsync(request, outputDirectory, receiptsDirectory, resolve, complete, downloads, token);
+                    foreach (var row in selection)
+                        results[row.Index] = result with { Index = row.Index };
                 });
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -137,33 +126,64 @@ internal static class BatchDownloads
             // Already completed items keep their receipts. Unscheduled items receive a canceled outcome.
         }
 
+        var published = new HashSet<string>(StringComparer.Ordinal);
         foreach (var request in requests)
         {
-            results[request.Index] ??= new(request.Index, request.ChatId, request.MessageId,
+            var result = results[request.Index] ?? new(request.Index, request.ChatId, request.MessageId,
                 null, null, "Canceled before download started.", "canceled");
+            if (result.Status == "downloaded" && !published.Add(result.Path!))
+                result = result with { Status = "skipped" };
+            results[request.Index] = result;
         }
 
         return results;
     }
 
-    private static async Task<BatchDownloadResult> RunItemAsync(
+    private static async Task<BatchDownloadResult> RunSelectionAsync(
         BatchDownloadRequest request,
         string outputDirectory,
         string receiptsDirectory,
         Func<BatchDownloadRequest, CancellationToken, Task<TdApi.File>> resolve,
         Func<BatchDownloadRequest, TdApi.File, CancellationToken, Task<TdApi.File>> complete,
+        ConcurrentDictionary<string, Lazy<Task<BatchDownloadResult>>> downloads,
         CancellationToken cancellationToken)
     {
-        TdApi.File? file = null;
+        try
+        {
+            var file = await resolve(request, cancellationToken);
+            var prefix = AttachmentPrefix(request, file);
+            var download = downloads.GetOrAdd(prefix, _ => new Lazy<Task<BatchDownloadResult>>(() =>
+                DownloadAsync(request, file, prefix, outputDirectory, receiptsDirectory, complete, cancellationToken)));
+            return await download.Value;
+        }
+        catch (OperationCanceledException)
+        {
+            return new(request.Index, request.ChatId, request.MessageId, null, null, "Download canceled.", "canceled");
+        }
+        catch (Exception ex)
+        {
+            return new(request.Index, request.ChatId, request.MessageId, null, null, ex.Message, "error");
+        }
+    }
+
+    private static async Task<BatchDownloadResult> DownloadAsync(
+        BatchDownloadRequest request,
+        TdApi.File file,
+        string prefix,
+        string outputDirectory,
+        string receiptsDirectory,
+        Func<BatchDownloadRequest, TdApi.File, CancellationToken, Task<TdApi.File>> complete,
+        CancellationToken cancellationToken)
+    {
         string? destination = null;
         try
         {
-            file = await resolve(request, cancellationToken);
+            cancellationToken.ThrowIfCancellationRequested();
             if (!string.IsNullOrWhiteSpace(file.Local?.Path))
-                destination = ResolveDestination(outputDirectory, request, file);
+                destination = ResolveDestination(outputDirectory, prefix, file);
 
-            var receiptPath = Path.Combine(receiptsDirectory, RequestPrefix(request) + ".json");
-            var receipt = await VerifyReceiptAsync(receiptPath, outputDirectory, request, file, cancellationToken);
+            var receiptPath = Path.Combine(receiptsDirectory, prefix + ".json");
+            var receipt = await VerifyReceiptAsync(receiptPath, outputDirectory, prefix, file, cancellationToken);
             if (receipt is not null)
             {
                 return new(request.Index, request.ChatId, request.MessageId, file.Id,
@@ -171,7 +191,7 @@ internal static class BatchDownloads
             }
 
             file = await complete(request, file, cancellationToken);
-            destination = ResolveDestination(outputDirectory, request, file);
+            destination = ResolveDestination(outputDirectory, prefix, file);
             using var stage = await AtomicDownload.StageAsync(file, destination, cancellationToken, StagePrefix);
             var next = new Receipt(Path.GetFileName(destination), stage.Size, stage.Sha256,
                 HashIdentity(file.Remote?.UniqueId), HashIdentity(file.Remote?.Id));
@@ -183,16 +203,16 @@ internal static class BatchDownloads
         }
         catch (OperationCanceledException)
         {
-            return new(request.Index, request.ChatId, request.MessageId, file?.Id, destination, "Download canceled.", "canceled");
+            return new(request.Index, request.ChatId, request.MessageId, file.Id, destination, "Download canceled.", "canceled");
         }
         catch (Exception ex)
         {
-            return new(request.Index, request.ChatId, request.MessageId, file?.Id, destination, ex.Message, "error");
+            return new(request.Index, request.ChatId, request.MessageId, file.Id, destination, ex.Message, "error");
         }
     }
 
     private static async Task<Receipt?> VerifyReceiptAsync(
-        string path, string outputDirectory, BatchDownloadRequest request, TdApi.File file, CancellationToken cancellationToken)
+        string path, string outputDirectory, string prefix, TdApi.File file, CancellationToken cancellationToken)
     {
         try
         {
@@ -203,7 +223,7 @@ internal static class BatchDownloads
             if (receipt is null
                 || string.IsNullOrWhiteSpace(receipt.Name)
                 || Path.GetFileName(receipt.Name) != receipt.Name
-                || !receipt.Name.StartsWith(RequestPrefix(request) + "_", StringComparison.Ordinal)
+                || !receipt.Name.StartsWith(prefix + "_", StringComparison.Ordinal)
                 || !MatchesIdentity(receipt, file)
                 || file.Size > 0 && receipt.Size != file.Size)
             {
@@ -257,8 +277,15 @@ internal static class BatchDownloads
     private static string? HashIdentity(string? value) => string.IsNullOrWhiteSpace(value)
         ? null : Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(value)));
 
-    private static string RequestPrefix(BatchDownloadRequest request) =>
-        FormattableString.Invariant($"{request.ChatId}_{request.MessageId}");
+    private static string AttachmentPrefix(BatchDownloadRequest request, TdApi.File file)
+    {
+        var unique = HashIdentity(file.Remote?.UniqueId);
+        var remote = HashIdentity(file.Remote?.Id);
+        var identity = unique is not null ? "u" + unique
+            : remote is not null ? "r" + remote
+            : FormattableString.Invariant($"i{file.Id}");
+        return FormattableString.Invariant($"{request.ChatId}_{request.MessageId}_{identity}");
+    }
 
     private static void DeleteTemporary(string path)
     {
@@ -276,16 +303,50 @@ internal static class BatchDownloads
         return parallel;
     }
 
-    public static string ResolveDestination(string outputDirectory, BatchDownloadRequest request, TdApi.File file)
+    public static string ResolveDestination(string outputDirectory, BatchDownloadRequest request, TdApi.File file) =>
+        ResolveDestination(outputDirectory, AttachmentPrefix(request, file), file);
+
+    private static string ResolveDestination(string outputDirectory, string prefix, TdApi.File file)
     {
-        var directory = Path.GetFullPath(outputDirectory);
         var sourceName = Path.GetFileName(file.Local?.Path);
         if (string.IsNullOrWhiteSpace(sourceName))
-        {
             sourceName = $"telegram-file-{file.Id}";
+
+        const int maximumNameBytes = 240;
+        var remaining = maximumNameBytes - prefix.Length - 1;
+        if (Encoding.UTF8.GetByteCount(sourceName) > remaining)
+        {
+            var extension = Path.GetExtension(sourceName);
+            if (Encoding.UTF8.GetByteCount(extension) > 16)
+                extension = string.Empty;
+            remaining -= Encoding.UTF8.GetByteCount(extension);
+            var name = new StringBuilder();
+            foreach (var character in Path.GetFileNameWithoutExtension(sourceName).EnumerateRunes())
+            {
+                remaining -= character.Utf8SequenceLength;
+                if (remaining < 0)
+                    break;
+                name.Append(character.ToString());
+            }
+            sourceName = name.Append(extension).ToString();
         }
 
-        return Path.Combine(directory, $"{RequestPrefix(request)}_{sourceName}");
+        return Path.Combine(Path.GetFullPath(outputDirectory), $"{prefix}_{sourceName}");
+    }
+
+    private static string? NormalizeType(string? type)
+    {
+        var kind = AttachmentKinds.Parse(type ?? "file", allowThumbnail: true);
+        return kind is AttachmentKind.All or AttachmentKind.File ? null : AttachmentKinds.CanonicalName(kind);
+    }
+
+    private static string? NormalizeAttachmentId(string? id)
+    {
+        if (string.IsNullOrWhiteSpace(id))
+            return null;
+        return int.TryParse(id, NumberStyles.AllowLeadingSign, CultureInfo.InvariantCulture, out var fileId)
+            ? fileId.ToString(CultureInfo.InvariantCulture)
+            : id;
     }
 
     public static JObject ToJson(BatchDownloadResult result)
