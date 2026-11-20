@@ -26,27 +26,41 @@ internal sealed class McpTools(IMcpTelegramBackend backend)
     internal async Task<CallToolResult> CallAsync(string name, IDictionary<string, JsonElement>? arguments, CancellationToken token)
     {
         var tool = Catalog.FirstOrDefault(x => x.Name == name)
-            ?? throw new McpProtocolException($"Unknown tool: {name}", McpErrorCode.InvalidParams);
+            ?? throw new McpProtocolException("Unknown tool. Use tools/list to see available tools.", McpErrorCode.InvalidParams);
+        var args = new McpArguments(arguments);
+        try { args.Validate(tool.InputSchema); }
+        catch (ArgumentException ex) { return Error("invalid_arguments", ex.Message); }
+
         try
         {
-            var args = new McpArguments(arguments);
-            args.Validate(tool.InputSchema);
             var result = await backend.ExecuteAsync(name, args, token);
             var json = result.ToJsonString();
             var response = new CallToolResult { Content = [new TextContentBlock { Text = json }], StructuredContent = JsonSerializer.SerializeToElement(result) };
             // Include both structuredContent and the escaped text copy. Leave room
             // for the SDK's JSON-RPC envelope, resultType and server metadata.
             if (JsonSerializer.SerializeToUtf8Bytes(response).Length > MaxResponseBytes - 1024)
-                throw new InvalidOperationException("Response exceeds 512 KiB. Request a smaller page or narrower filters. No partial response was returned.");
+                return Error("response_too_large", "Response exceeds 512 KiB. Request a smaller page or narrower filters.");
             return response;
         }
         catch (OperationCanceledException) when (token.IsCancellationRequested) { throw; }
         catch (Exception ex) when (ex is not OutOfMemoryException)
         {
-            // Do not log message bodies, arguments or credentials. These errors are private tool results.
-            return new() { IsError = true, Content = [new TextContentBlock { Text = ex.Message }] };
+            // Backend exception text can contain Telegram payloads, credentials, file paths or arguments.
+            return ex switch
+            {
+                TimeoutException => Error("request_timeout", "Telegram request timed out. Wait for outstanding work to finish before retrying."),
+                ArgumentException => Error("invalid_arguments", "Check the tool arguments and start a new query if its cursor is no longer valid."),
+                UnauthorizedAccessException => Error("access_denied", "Check access to the Telegram session and the requested operation."),
+                IOException => Error("io_error", "Check the Telegram session and file access. Another process may hold the session lock."),
+                System.ComponentModel.DataAnnotations.ValidationException =>
+                    Error("validation_failed", "Check the tool arguments and Telegram authorization. Use tgcli login if the session needs authorization."),
+                _ => Error("operation_failed", "The Telegram operation failed. Check session status and diagnostics.")
+            };
         }
     }
+
+    private static CallToolResult Error(string code, string message) =>
+        new() { IsError = true, Content = [new TextContentBlock { Text = $"{code}: {message}" }] };
 
     private static IReadOnlyList<Tool> BuildCatalog()
     {
@@ -121,7 +135,7 @@ internal sealed class McpArguments(IDictionary<string, JsonElement>? values)
             if (!_values.ContainsKey(required.GetString()!)) throw new ArgumentException($"Missing argument: {required.GetString()}.");
         foreach (var (key, value) in _values)
         {
-            if (!properties.TryGetProperty(key, out var rule)) throw new ArgumentException($"Unknown argument: {key}.");
+            if (!properties.TryGetProperty(key, out var rule)) throw new ArgumentException("Unknown argument. Use tools/list to check the tool input schema.");
             var valid = rule.GetProperty("type").GetString() switch
             {
                 "string" => value.ValueKind == JsonValueKind.String,
