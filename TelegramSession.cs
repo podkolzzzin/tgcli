@@ -107,7 +107,9 @@ internal sealed class TelegramSession : IAsyncDisposable
             SessionSecret.RecoverImport(root);
             var config = SessionConfig.Load(root);
             config.ApplyOverrides(apiId, apiHash);
-            config.Validate();
+            if (!config.HasCredentials)
+                throw new TelegramAuthorizationException(TelegramAuthorizationFailure.LoginRequired,
+                    "Telegram API credentials are missing. Run `tgcli login` with --api-id and --api-hash or set TGCLI_API_ID/TGCLI_API_HASH.");
             ct.ThrowIfCancellationRequested();
             config.EnsureDirectories();
             if (saveConfig) config.Save();
@@ -551,6 +553,7 @@ internal sealed class TelegramSession : IAsyncDisposable
     {
         public int ApiId { get; set; }
         public string ApiHash { get; set; } = string.Empty;
+        public bool HasCredentials => ApiId > 0 && !string.IsNullOrWhiteSpace(ApiHash);
         public string RootDirectory { get; init; } = string.Empty;
         public string DatabaseDirectory => Path.Combine(RootDirectory, "tdlib-db");
         public string FilesDirectory => Path.Combine(RootDirectory, "tdlib-files");
@@ -595,7 +598,7 @@ internal sealed class TelegramSession : IAsyncDisposable
 
         public void Validate()
         {
-            if (ApiId <= 0 || string.IsNullOrWhiteSpace(ApiHash))
+            if (!HasCredentials)
             {
                 throw new ValidationException("Telegram api id/hash are required. Pass --api-id/--api-hash or set TGCLI_API_ID/TGCLI_API_HASH.");
             }

@@ -95,7 +95,8 @@ internal static class SessionSecret
     {
         var root = TelegramSession.ResolveSessionDirectory(sessionDirectory);
         if (!Directory.Exists(root))
-            throw new ValidationException($"Session directory {root} was not found. Run `tgcli login` first.");
+            throw new TelegramAuthorizationException(TelegramAuthorizationFailure.LoginRequired,
+                "Session directory was not found. Run `tgcli login` first.");
 
         using var lease = SessionLock.Acquire(root);
         RecoverImport(root);
@@ -255,7 +256,8 @@ internal static class SessionSecret
     private static byte[] ReadFile(string path, int maxBytes)
     {
         if (!File.Exists(path))
-            throw new ValidationException($"Session authorization file was not found at {path}. Run `tgcli login` first.");
+            throw new TelegramAuthorizationException(TelegramAuthorizationFailure.LoginRequired,
+                "Session authorization files were not found. Run `tgcli login` first.");
         using var file = File.OpenRead(path);
         if (file.Length <= 0 || file.Length > maxBytes)
             throw new ValidationException($"Session authorization file at {path} has an invalid size.");

@@ -26,36 +26,19 @@ public sealed class TgCommands
     /// </summary>
     public async Task Diagnostics(string format = "json", int lockTimeout = 5, bool noWait = false, string? session = null)
     {
-        var started = DateTimeOffset.UtcNow;
-        await using var tg = await TelegramSession.CreateReadyAsync(session, lockTimeout, noWait);
-        var me = await tg.Client.GetMeAsync();
-        var version = await tg.Client.GetOptionAsync("version");
-        var payload = new JObject
-        {
-            ["healthy"] = tg.IsConnected,
-            ["checked_at"] = DateTimeOffset.UtcNow.ToString("O"),
-            ["latency_ms"] = (DateTimeOffset.UtcNow - started).TotalMilliseconds,
-            ["tdlib_version"] = version?.GetType().GetProperty("Value")?.GetValue(version)?.ToString(),
-            ["authenticated_account"] = new JObject
-            {
-                ["user_id"] = me.Id,
-                ["display_name"] = $"{me.FirstName} {me.LastName}".Trim(),
-                ["username"] = me.Usernames?.ActiveUsernames?.FirstOrDefault()
-            },
-            ["session_directory"] = tg.SessionDirectory,
-            ["database_directory"] = tg.DatabaseDirectory,
-            ["database_exists"] = Directory.Exists(tg.DatabaseDirectory),
-            ["database_size_bytes"] = Directory.Exists(tg.DatabaseDirectory)
-                ? Directory.EnumerateFiles(tg.DatabaseDirectory, "*", SearchOption.AllDirectories).Sum(path => new FileInfo(path).Length)
-                : 0,
-            ["network_available"] = tg.IsConnected,
-            ["connection_state"] = tg.ConnectionState
-        };
-        Console.WriteLine(format.Trim().ToLowerInvariant() switch
-        {
-            "json" or "jsonl" or "plain" => payload.ToString(Formatting.None),
-            _ => throw new ArgumentException("Format must be one of: json, jsonl, plain.", nameof(format))
-        });
+        var outputFormat = Output.ParseFormat(format);
+        if (outputFormat is not (OutputFormat.Json or OutputFormat.Jsonl or OutputFormat.Plain))
+            throw new ArgumentException("Format must be one of: json, jsonl, plain.", nameof(format));
+        if (lockTimeout < 0) throw new ArgumentException("Lock timeout must be zero or greater.", nameof(lockTimeout));
+
+        var cancellationToken = CliExecution.CancellationToken;
+        var remaining = CliExecution.Remaining;
+        TimeSpan? probeBudget = remaining == Timeout.InfiniteTimeSpan ? null :
+            TimeSpan.FromMilliseconds(Math.Max(0, remaining.TotalMilliseconds - 150));
+        var result = await SessionDiagnostic.ProbeAsync(session, lockTimeout, noWait, cancellationToken, probeBudget);
+        cancellationToken.ThrowIfCancellationRequested();
+        Console.WriteLine(result.Data.ToString(Formatting.None));
+        if (result.Error is not null) throw result.Error;
     }
 
     /// <summary>
