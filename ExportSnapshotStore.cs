@@ -86,6 +86,7 @@ internal sealed class ExportSnapshotStore : IDisposable
 
     public ExportCache? ReadCache(ExportRequest request, CancellationToken cancellationToken = default)
     {
+        request.RequirePrincipal();
         if (!File.Exists(_path) && !File.Exists(_manifestPath))
         {
             if (request.CheckpointToken is not null)
@@ -102,7 +103,7 @@ internal sealed class ExportSnapshotStore : IDisposable
             manifest["resumable"]?.Type != JTokenType.Boolean || manifest.Value<bool>("resumable") != true ||
             !JToken.DeepEquals(manifest["snapshot_scope"], request.Scope) ||
             manifest.Value<string>("schema") != ExportSchema.Name || manifest.Value<string>("schema_version") != ExportSchema.Version)
-            throw new InvalidDataException("The existing export has an incompatible chat, filter, projection or schema. Create a fresh export.");
+            throw new InvalidDataException("The existing export has an incompatible account, chat, filter, projection or schema. Create a fresh export.");
 
         if (manifest["source_chats"] is not JArray sourceArray)
             throw new InvalidDataException("The export manifest has no source scope.");

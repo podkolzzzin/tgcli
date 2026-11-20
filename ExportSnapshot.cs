@@ -52,6 +52,7 @@ internal sealed class ExportSnapshot
 
     public static ExportSnapshot Build(ExportRequest request, HistoryFetchResult history, ExportCache? previous)
     {
+        request.RequirePrincipal();
         var sources = history.SourceChats.ToHashSet();
         if (sources.Count != history.SourceChats.Count || sources.Contains(0) || !sources.Contains(request.ChatId) ||
             !request.All && sources.Count != 1)

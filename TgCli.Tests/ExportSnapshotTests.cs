@@ -15,6 +15,7 @@ namespace TgCli.Tests;
 
 public sealed class ExportSnapshotTests
 {
+    private const long Principal = 101;
     private static CancellationToken Cancellation => TestContext.Current.CancellationToken;
 
     [Theory]
@@ -78,6 +79,39 @@ public sealed class ExportSnapshotTests
         await Export(work.Output, Request(resume: true), History([10], Message(10, 2, 200, "new")));
 
         Assert.Equal(new[] { "prior", "new" }, ReadRows(work.Output).Select(row => row.Value<string>("text")));
+    }
+
+    [Fact]
+    public async Task DifferentAccountCannotRefreshTheSameChatSnapshot()
+    {
+        using var work = new ExportDirectory();
+        await Export(work.Output, Request(), History([10], Message(10, 1, 100, "visible to the original account")));
+        var originalData = File.ReadAllBytes(work.Output);
+        var originalManifest = File.ReadAllBytes(work.Output + ".manifest.json");
+
+        var otherAccount = Request(incremental: true, principal: 102);
+        await Assert.ThrowsAsync<InvalidDataException>(() => Export(work.Output, otherAccount, History([10])));
+
+        Assert.Equal(originalData, File.ReadAllBytes(work.Output));
+        Assert.Equal(originalManifest, File.ReadAllBytes(work.Output + ".manifest.json"));
+    }
+
+    [Fact]
+    public async Task CheckpointRejectsDifferentAccountWhileSameAccountCanReuseCopiedSnapshot()
+    {
+        using var work = new ExportDirectory();
+        var first = History([10], Message(10, 1, 100, "prior"));
+        var manifest = await Export(work.Output, Request(), first);
+        var checkpoint = manifest.Value<string>("resume_token");
+        Assert.NotNull(checkpoint);
+        Assert.Throws<ArgumentException>(() => Request(token: checkpoint, principal: 102));
+
+        var copied = Path.Combine(work.Root, "copied.jsonl");
+        File.Copy(work.Output, copied);
+        File.Copy(work.Output + ".manifest.json", copied + ".manifest.json");
+        await Export(copied, Request(resume: true, token: checkpoint), History([10], Message(10, 2, 200, "new")));
+        Assert.Equal(new[] { "prior", "new" }, ReadRows(copied).Select(row => row.Value<string>("text")));
+        Assert.Equal("101", ReadManifest(copied)["snapshot_scope"]?.Value<string>("principal_user_id"));
     }
 
     [Fact]
@@ -249,7 +283,7 @@ public sealed class ExportSnapshotTests
     [Fact]
     public void LocalCacheCannotClaimCompletenessEvenWhenHistoryReportsEof()
     {
-        var request = ExportRequest.Create(10, "-", "jsonl", local: true);
+        var request = ExportRequest.Create(10, "-", "jsonl", local: true).BindPrincipal(Principal);
         var snapshot = ExportSnapshot.Build(request, History([10], Message(10, 1, 100, "cached")), null);
 
         Assert.False(snapshot.Manifest.Value<bool>("complete"));
@@ -261,7 +295,7 @@ public sealed class ExportSnapshotTests
     [Fact]
     public void FreshOnlineExportFailsWhenServerCoverageIsIncomplete()
     {
-        var request = ExportRequest.Create(10, "-", "jsonl");
+        var request = ExportRequest.Create(10, "-", "jsonl").BindPrincipal(Principal);
         var history = History([10], Message(10, 1, 100, "cached"));
         history.Complete = false;
         history.TerminationReason = "max_pages_reached";
@@ -272,7 +306,7 @@ public sealed class ExportSnapshotTests
     [Fact]
     public void CompletenessRequiresPageEvidenceForEveryMigrationSegment()
     {
-        var request = ExportRequest.Create(10, "-", "jsonl");
+        var request = ExportRequest.Create(10, "-", "jsonl").BindPrincipal(Principal);
         var history = History([10, -20], Message(10, 1, 100, "cached"));
         history.PagesByChat.Remove(-20);
 
@@ -302,9 +336,10 @@ public sealed class ExportSnapshotTests
     }
 
     private static ExportRequest Request(long chatId = 10, bool resume = false, bool incremental = false,
-        long sinceMessageId = 0, string? fields = null, string? token = null, string? expectSince = null) =>
+        long sinceMessageId = 0, string? fields = null, string? token = null, string? expectSince = null,
+        long principal = Principal) =>
         ExportRequest.Create(chatId, "snapshot.jsonl", "jsonl", resume: resume, incremental: incremental,
-            sinceMessageId: sinceMessageId, fields: fields, resumeToken: token, expectSince: expectSince);
+            sinceMessageId: sinceMessageId, fields: fields, resumeToken: token, expectSince: expectSince).BindPrincipal(principal);
 
     private static async Task<JObject> Export(string path, ExportRequest request, HistoryFetchResult history,
         Action<string, string>? replace = null)

@@ -6,7 +6,7 @@ using Newtonsoft.Json.Linq;
 
 namespace TgCli;
 
-internal sealed class ExportRequest
+internal sealed record ExportRequest
 {
     private const string CheckpointPrefix = "tgcli-export-v1.";
     private static readonly HashSet<string> FieldNames = new(StringComparer.Ordinal)
@@ -20,6 +20,8 @@ internal sealed class ExportRequest
     };
 
     private ExportRequest() { }
+
+    private sealed record ParsedCheckpoint(long PrincipalUserId, IReadOnlyDictionary<long, long> Cursors);
 
     public long ChatId { get; private init; }
     public string? Path { get; private init; }
@@ -40,7 +42,8 @@ internal sealed class ExportRequest
     public DateTimeOffset? ExpectSince { get; private init; }
     public int ExpectCountMin { get; private init; }
     public JObject Scope { get; private init; } = null!;
-    private string Fingerprint { get; init; } = null!;
+    private long? PrincipalUserId { get; init; }
+    private long? CheckpointPrincipalUserId { get; init; }
 
     public static ExportRequest Create(long chatId, string output, string format, bool all = true, bool local = false,
         int maxPages = 1000, bool includeLinks = false, bool resume = false, bool incremental = false,
@@ -93,7 +96,7 @@ internal sealed class ExportRequest
                 ? "external:" + Hash(transcribeCommand)
                 : transcribe ? "built-in:" + transcribeLanguage.Trim().ToLowerInvariant() : "disabled"
         };
-        var fingerprint = Hash(scope.ToString(Formatting.None));
+        var checkpoint = resumeToken is null ? null : ParseCheckpoint(resumeToken, scope, chatId);
         return new ExportRequest
         {
             ChatId = chatId,
@@ -109,15 +112,30 @@ internal sealed class ExportRequest
             HasRowDate = names is null || names.Contains("date"),
             Fields = normalizedFields,
             CheckpointToken = resumeToken,
-            Checkpoint = resumeToken is null ? null : ParseCheckpoint(resumeToken, fingerprint, chatId),
+            Checkpoint = checkpoint?.Cursors,
+            CheckpointPrincipalUserId = checkpoint?.PrincipalUserId,
             SinceMessageId = sinceMessageId,
             Since = since,
             ExpectSince = expected,
             ExpectCountMin = expectCountMin,
-            Scope = scope,
-            Fingerprint = fingerprint
+            Scope = scope
         };
     }
+
+    public ExportRequest BindPrincipal(long userId)
+    {
+        if (userId <= 0)
+            throw new InvalidOperationException("The authenticated Telegram account has no valid user ID.");
+        if (CheckpointPrincipalUserId is long checkpointUserId && checkpointUserId != userId)
+            throw new ArgumentException("The export checkpoint belongs to a different Telegram account.");
+        if (PrincipalUserId is long boundUserId && boundUserId != userId)
+            throw new InvalidOperationException("The export scope is already bound to a different Telegram account.");
+
+        return this with { PrincipalUserId = userId, Scope = ScopeForPrincipal(Scope, userId) };
+    }
+
+    public long RequirePrincipal() =>
+        PrincipalUserId ?? throw new InvalidOperationException("The export scope must be bound to an authenticated Telegram account.");
 
     public bool Includes(ExportedMessage row)
     {
@@ -129,13 +147,15 @@ internal sealed class ExportRequest
 
     public string CreateCheckpoint(IReadOnlySet<long> sources, IEnumerable<ExportRowKey> activeKeys, bool keepInputCursor = true)
     {
+        var principalId = RequirePrincipal();
         var cursors = sources.ToDictionary(chat => chat,
             chat => keepInputCursor ? Checkpoint?.GetValueOrDefault(chat) ?? 0 : 0);
         foreach (var key in activeKeys) cursors[key.ChatId] = Math.Max(cursors[key.ChatId], key.MessageId);
 
         var encoded = new JObject
         {
-            ["scope"] = Fingerprint,
+            ["scope"] = Hash(Scope.ToString(Formatting.None)),
+            ["principal_user_id"] = FormatId(principalId),
             ["cursors"] = new JObject(cursors.OrderBy(x => x.Key).Select(x =>
                 new JProperty(FormatId(x.Key), FormatId(x.Value))))
         };
@@ -143,7 +163,7 @@ internal sealed class ExportRequest
             .TrimEnd('=').Replace('+', '-').Replace('/', '_');
     }
 
-    private static IReadOnlyDictionary<long, long> ParseCheckpoint(string token, string fingerprint, long chatId)
+    private static ParsedCheckpoint ParseCheckpoint(string token, JObject scope, long chatId)
     {
         const int maxTokenLength = 65536;
         if (!token.StartsWith(CheckpointPrefix, StringComparison.Ordinal) || token.Length > maxTokenLength)
@@ -153,7 +173,10 @@ internal sealed class ExportRequest
         {
             var payload = ExportSnapshotStore.ParseObject(Encoding.UTF8.GetString(
                 Convert.FromBase64String(encoded.PadRight((encoded.Length + 3) / 4 * 4, '='))));
-            if (payload.Value<string>("scope") != fingerprint || payload["cursors"] is not JObject cursors)
+            if (payload["principal_user_id"]?.Type != JTokenType.String ||
+                !TryParseId(payload["principal_user_id"], out var principalId) || principalId <= 0 ||
+                payload.Value<string>("scope") != Hash(ScopeForPrincipal(scope, principalId).ToString(Formatting.None)) ||
+                payload["cursors"] is not JObject cursors)
                 throw new FormatException();
             var parsed = new Dictionary<long, long>();
             foreach (var cursor in cursors.Properties())
@@ -163,12 +186,19 @@ internal sealed class ExportRequest
                     throw new FormatException();
             }
             if (!parsed.ContainsKey(chatId)) throw new FormatException();
-            return parsed;
+            return new ParsedCheckpoint(principalId, parsed);
         }
         catch (Exception ex) when (ex is JsonException or FormatException or InvalidCastException)
         {
             throw new ArgumentException("The export checkpoint is invalid or belongs to another chat, schema or filter.", ex);
         }
+    }
+
+    private static JObject ScopeForPrincipal(JObject scope, long principalId)
+    {
+        var bound = (JObject)scope.DeepClone();
+        bound["principal_user_id"] = FormatId(principalId);
+        return bound;
     }
 
     private static HashSet<string>? ParseFields(string? fields, OutputFormat format)

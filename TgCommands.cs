@@ -1146,10 +1146,14 @@ public sealed class ChatCommands
             transcribeCommand, expectSince, expectCountMin, failIncomplete);
         cancellationToken.ThrowIfCancellationRequested();
         await using var transcription = TranscriptionCommands.Create(transcribe, transcribeLanguage, transcribeCommand);
+        await using var tg = await TelegramSession.CreateReadyAsync(session, local: local);
+        cancellationToken.ThrowIfCancellationRequested();
+        var principal = await tg.Client.GetMeAsync();
+        cancellationToken.ThrowIfCancellationRequested();
+        request = request.BindPrincipal(principal.Id);
         using var store = request.Path is null ? null : ExportSnapshotStore.Open(request.Path);
         var previous = request.UpdatesSnapshot ? store!.ReadCache(request, cancellationToken) : null;
 
-        await using var tg = await TelegramSession.CreateReadyAsync(session, local: local);
         var history = await ChatHistory.FetchAsync(tg, chatId, request.All, local, maxPages,
             followMigrations: request.All, cancellationToken: cancellationToken);
         var snapshot = ExportSnapshot.Build(request, history, previous);
