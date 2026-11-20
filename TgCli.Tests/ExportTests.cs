@@ -25,6 +25,7 @@ public sealed class ExportTests
             TerminationReason = "max_pages_reached"
         };
         history.SourceChats.Add(-1001);
+        history.ChannelChats.Add(-1001);
         history.PagesByChat[-1001] = 3;
         history.OldestReachableByChat[-1001] = ChatHistory.ToChannelMessageId(42);
         history.Messages.Add(new ExportedMessage(
@@ -69,6 +70,7 @@ public sealed class ExportTests
     {
         var history = new HistoryFetchResult { Complete = true };
         history.SourceChats.Add(-1001);
+        history.ChannelChats.Add(-1001);
         history.Messages.Add(new ExportedMessage(new TdApi.Message { ChatId = -1001, Id = ChatHistory.ToChannelMessageId(1), Date = 100 }, -1001, -1001, ChatHistory.ToChannelMessageId(1)));
         history.Messages.Add(new ExportedMessage(new TdApi.Message { ChatId = -1001, Id = ChatHistory.ToChannelMessageId(3), Date = 300 }, -1001, -1001, ChatHistory.ToChannelMessageId(3)));
 

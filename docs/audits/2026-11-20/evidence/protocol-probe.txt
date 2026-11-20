@@ -1,0 +1,19 @@
+assembly=/home/andrii/RiderProjects/tgcli/TgCli.Tests/McpTestServer/bin/Debug/net10.0/TgCli.McpTestServer.dll
+malformed_initialize
+request={"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}
+response={"error": {"code": -32603, "message": "An error occurred."}, "id": 1, "jsonrpc": "2.0"}
+request={"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}}
+response_result_keys=['tools']
+request={"jsonrpc": "2.0", "id": 3, "method": "tools/list", "params": {"_meta": {"io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": {}}}}
+response_result_keys=['tools', 'ttlMs', 'cacheScope', 'resultType', '_meta']
+exit=0
+stderr=
+switch_after_modern
+request={"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {"_meta": {"io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": {}}}}
+response_result_keys=['tools', 'ttlMs', 'cacheScope', 'resultType', '_meta']
+request={"jsonrpc": "2.0", "id": 2, "method": "initialize", "params": {"protocolVersion": "2025-11-25", "capabilities": {}, "clientInfo": {"name": "probe", "version": "1"}}}
+response_result_keys=['protocolVersion', 'capabilities', 'serverInfo', 'instructions']
+request={"jsonrpc": "2.0", "id": 3, "method": "tools/list", "params": {}}
+response={"error": {"code": -32602, "message": "Each modern request requires protocolVersion and clientCapabilities in _meta."}, "id": 3, "jsonrpc": "2.0"}
+exit=0
+stderr=

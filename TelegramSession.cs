@@ -12,6 +12,7 @@ internal sealed class TelegramSession : IAsyncDisposable
     private string? _lockOwnerPath;
     private TdApi.AuthorizationState? _authorizationState;
     private TaskCompletionSource<TdApi.AuthorizationState> _authorizationChanged = NewAuthorizationChangedSource();
+    private readonly TelegramConnection _connection = new();
 
     private TelegramSession(TdClient client, SessionConfig config)
     {
@@ -24,6 +25,11 @@ internal sealed class TelegramSession : IAsyncDisposable
     public string SessionDirectory => _config.RootDirectory;
     public string DatabaseDirectory => _config.DatabaseDirectory;
     public string FilesDirectory => _config.FilesDirectory;
+    public bool IsConnected => _connection.IsReady;
+    public string ConnectionState => _connection.StateName;
+
+    public Task EnsureConnectedAsync(CancellationToken cancellationToken = default) =>
+        _connection.WaitReadyAsync(TimeSpan.FromSeconds(30), cancellationToken);
 
     internal static string ResolveSessionDirectory(string? path) => Path.GetFullPath(path ?? SessionConfig.DefaultRootDirectory());
 
@@ -67,12 +73,13 @@ internal sealed class TelegramSession : IAsyncDisposable
         }
     }
 
-    public static async Task<TelegramSession> CreateReadyAsync(string? sessionDirectory, int lockTimeout = 30, bool noWait = false)
+    public static async Task<TelegramSession> CreateReadyAsync(string? sessionDirectory, int lockTimeout = 30, bool noWait = false, bool local = false)
     {
         var session = await CreateAsync(sessionDirectory, apiId: 0, apiHash: null, saveConfig: false, lockTimeout, noWait);
         try
         {
             await session.EnsureReadyAsync();
+            if (!local) await session.EnsureConnectedAsync();
             return session;
         }
         catch
@@ -239,7 +246,7 @@ internal sealed class TelegramSession : IAsyncDisposable
                 systemLanguageCode: "en",
                 deviceModel: Environment.MachineName,
                 systemVersion: RuntimeInformation.OSDescription,
-                applicationVersion: "7.0.0");
+                applicationVersion: "7.0.1");
         }
     }
 
@@ -379,6 +386,11 @@ internal sealed class TelegramSession : IAsyncDisposable
 
     private void OnUpdateReceived(object? sender, TdApi.Update update)
     {
+        if (update is TdApi.Update.UpdateConnectionState connectionUpdate)
+        {
+            _connection.Update(connectionUpdate.State);
+            return;
+        }
         if (update is not TdApi.Update.UpdateAuthorizationState authUpdate)
         {
             return;

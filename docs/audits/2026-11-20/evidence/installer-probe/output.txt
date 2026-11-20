@@ -1,0 +1,5 @@
+discovery exception=InvalidDataException base=SystemException message=Duplicate Eclipse preference: RECENT_WORKSPACES.
+whitespace property original recognized=False
+merged contains original=True new-entry=True
+merged="mcp {\u0022servers\u0022:{\u0022tgcli\u0022:{\u0022command\u0022:\u0022existing\u0022,\u0022args\u0022:[]}}}\nmcp={\\n  \u0022servers\u0022\\: {\u0022tgcli\u0022\\: {\u0022type\u0022\\:\u0022stdio\u0022,\u0022command\u0022\\:\u0022/new/tgcli\u0022,\u0022args\u0022\\:[\u0022mcp\u0022]}}\\n}\\n\n"
+path picks non-executable=True

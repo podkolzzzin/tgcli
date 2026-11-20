@@ -1,0 +1,4 @@
+acquire_failure=UnauthorizedAccessException
+lock_released=False
+invalid_import_accepted=True; original_preserved=False
+prompt_eof_reads=11; prompts=12

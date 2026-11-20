@@ -1,0 +1,25 @@
+using TgCli;
+using TdLib;
+using Newtonsoft.Json.Linq;
+using System.Reflection;
+static TdApi.Messages Page(params long[] ids) => new() { Messages_ = ids.Select(x => new TdApi.Message { ChatId=1, Id=x, Date=(int)x }).ToArray() };
+var pages = new Queue<TdApi.Messages>([Page(100), Page(90,80), Page()]);
+var requests = new List<long>();
+var forum = await ForumTopicHistory.FetchAsync(1,10,0,0,100,true,10,(r,_)=>{requests.Add(r.FromMessageId);return Task.FromResult(pages.Dequeue());},CancellationToken.None);
+Console.WriteLine($"forum_short_page: complete={forum.Complete}, reason={forum.TerminationReason}, count={forum.Messages.Count}, requests={string.Join(',',requests)}, unused_pages={pages.Count}");
+var bounded = await ForumTopicHistory.FetchAsync(1,10,0,0,1,false,10,(_,_)=>Task.FromResult(Page(100)),CancellationToken.None);
+Console.WriteLine($"forum_bounded: complete={bounded.Complete}, reason={bounded.TerminationReason}, count={bounded.Messages.Count}");
+Console.WriteLine($"migration_basic_has_upgrade={typeof(TdApi.BasicGroup).GetProperty("UpgradedToSupergroupId") is not null}, full_info_has_upgrade={typeof(TdApi.BasicGroupFullInfo).GetProperty("UpgradedToSupergroupId") is not null}");
+Console.WriteLine($"migration_reflection_full_info_value={ChatHistory.GetLongProperty(new TdApi.BasicGroupFullInfo(),"UpgradedToSupergroupId")?.ToString() ?? "null"}");
+var photo = new TdApi.Message {Id=1, Content=new TdApi.MessageContent.MessagePhoto {Caption=new TdApi.FormattedText{Text="",Entities=[]}}};
+var poll = new TdApi.Message {Id=2, Content=new TdApi.MessageContent.MessagePoll()};
+var note = new TdApi.Message {Id=3, Content=new TdApi.MessageContent.MessageVideoNote()};
+Console.WriteLine($"service_only_accepts_non_service_ids={string.Join(',',ChatCommands.FilterMessages([photo,poll,note],true,null).Select(x=>x.Id))}");
+var localPages = new Queue<TdApi.Messages>([Page(100), Page()]);
+var local = await ChatHistory.FetchPagesAsync([1],true,true,10,(_,_)=>Task.FromResult(localPages.Dequeue()),_=>Task.FromResult(false));
+Console.WriteLine($"local_cache_exhausted: complete={local.Complete}, reason={local.TerminationReason}, count={local.Messages.Count}");
+var aggregate = typeof(ChannelCommands).GetMethod("BuildMetricAggregates",BindingFlags.Static|BindingFlags.NonPublic)!;
+JObject Row(int views)=>new(){["view_count"]=views,["forward_count"]=0,["reply_count"]=0,["reaction_count"]=0,["paid_reaction_count"]=0L,["has_comments"]=false,["post_id"]=1};
+try { aggregate.Invoke(null,new object[]{new List<JObject>{Row(1_500_000_000),Row(1_500_000_000)}});Console.WriteLine("metric_overflow=no"); }
+catch(TargetInvocationException ex){Console.WriteLine($"metric_aggregate_exception={ex.InnerException!.GetType().Name}");}
+Console.WriteLine($"group_link={MessageLinks.GetTgUrl(-1001234567890L,42L<<20)}");

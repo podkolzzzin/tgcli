@@ -1,0 +1,9 @@
+<Project Sdk="Microsoft.NET.Sdk">
+<PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net10.0</TargetFramework><AssemblyName>TgCli.Tests</AssemblyName><ImplicitUsings>enable</ImplicitUsings><Nullable>enable</Nullable></PropertyGroup>
+<ItemGroup>
+<Reference Include="tgcli"><HintPath>/home/andrii/RiderProjects/tgcli/bin/Debug/net10.0/tgcli.dll</HintPath></Reference>
+<Reference Include="TdLib"><HintPath>/home/andrii/RiderProjects/tgcli/bin/Debug/net10.0/TdLib.dll</HintPath></Reference>
+<Reference Include="TdLib.Api"><HintPath>/home/andrii/RiderProjects/tgcli/bin/Debug/net10.0/TdLib.Api.dll</HintPath></Reference>
+<Reference Include="Newtonsoft.Json"><HintPath>/home/andrii/RiderProjects/tgcli/bin/Debug/net10.0/Newtonsoft.Json.dll</HintPath></Reference>
+</ItemGroup>
+</Project>

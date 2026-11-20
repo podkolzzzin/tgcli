@@ -12,6 +12,7 @@ internal sealed class HistoryFetchResult
     public List<ExportedMessage> Messages { get; } = [];
     public List<long> SourceChats { get; } = [];
     public List<string> Warnings { get; } = [];
+    public HashSet<long> ChannelChats { get; } = [];
     public int PagesFetched { get; set; }
     public int Duplicates { get; set; }
     public int Retries { get; set; }
@@ -29,15 +30,25 @@ internal static class ChatHistory
 
     public static async Task<HistoryFetchResult> FetchAsync(TelegramSession tg, long chatId, bool all, bool local, int maxPages, bool followMigrations, CancellationToken cancellationToken = default)
     {
-        var result = new HistoryFetchResult();
         var chain = followMigrations ? await GetMigrationChainAsync(tg, chatId) : [chatId];
+        return await FetchPagesAsync(chain, all, local, maxPages,
+            (id, cursor) => tg.Client.GetChatHistoryAsync(id, cursor, offset: 0, limit: 100, onlyLocal: local),
+            id => IsChannelAsync(tg, id), cancellationToken);
+    }
+
+    internal static async Task<HistoryFetchResult> FetchPagesAsync(IReadOnlyList<long> chain, bool all, bool local, int maxPages,
+        Func<long, long, Task<TdApi.Messages>> fetchPage, Func<long, Task<bool>> isChannelChat,
+        CancellationToken cancellationToken = default)
+    {
+        var result = new HistoryFetchResult();
         var seen = new HashSet<(long ChatId, long MessageId)>();
 
         foreach (var sourceChatId in chain)
         {
             cancellationToken.ThrowIfCancellationRequested();
             result.SourceChats.Add(sourceChatId);
-            var isChannel = await IsChannelAsync(tg, sourceChatId);
+            var isChannel = await isChannelChat(sourceChatId);
+            if (isChannel) result.ChannelChats.Add(sourceChatId);
             var cursor = 0L;
             var exhausted = false;
             var pageLimit = all ? Math.Max(1, maxPages) : 1;
@@ -50,10 +61,10 @@ internal static class ChatHistory
                 {
                     try
                     {
-                        history = await tg.Client.GetChatHistoryAsync(sourceChatId, cursor, offset: 0, limit: 100, onlyLocal: local);
+                        history = await fetchPage(sourceChatId, cursor);
                         break;
                     }
-                    catch (Exception ex) when (attempt++ < 2)
+                    catch (Exception ex) when (ex is not OperationCanceledException && attempt++ < 2)
                     {
                         result.Retries++;
                         result.Warnings.Add($"Retry {attempt}/2 for chat {sourceChatId} cursor {cursor}: {ex.Message}");
@@ -92,6 +103,7 @@ internal static class ChatHistory
                 }
 
                 var oldestMessageId = history.Messages_.Min(x => x.Id);
+                var previousCursor = cursor;
                 cursor = oldestMessageId;
                 if (newMessages == 0 && isChannel && TryMoveToPreviousChannelAnchor(ref cursor))
                 {
@@ -103,20 +115,20 @@ internal static class ChatHistory
                     continue;
                 }
 
-                if (!all || history.Messages_.Length < 100)
+                if (!all)
                 {
-                    if (isChannel && GetShortMessageId(oldestMessageId) > 1)
-                    {
-                        result.Warnings.Add($"Short channel history page ({history.Messages_.Length} messages) at public id {GetShortMessageId(oldestMessageId)}; probing older public ids.");
-                        if (StopAtMaxPages(result, sourceChatId, maxPages, page, pageLimit))
-                        {
-                            break;
-                        }
+                    result.Complete = false;
+                    result.TerminationReason = "page_limit";
+                    break;
+                }
 
-                        continue;
-                    }
-
-                    exhausted = all;
+                // TDLib may return just one cached message even when more history exists.
+                // A short page is not EOF: continue until an empty page or a safety bound.
+                if (previousCursor != 0 && cursor >= previousCursor)
+                {
+                    result.Complete = false;
+                    result.TerminationReason = "cursor_not_advanced";
+                    result.Warnings.Add($"History cursor did not advance for chat {sourceChatId}; completeness is unknown.");
                     break;
                 }
 
@@ -238,6 +250,7 @@ internal static class ChatHistory
         var messages = history.Messages;
         var dates = messages.Select(x => x.Message.Date).Where(x => x > 0).ToArray();
         var publicIds = messages
+            .Where(x => history.ChannelChats.Contains(x.SourceChatId))
             .Select(x => GetShortMessageId(x.Message.Id))
             .Where(x => x > 0)
             .Distinct()
@@ -270,8 +283,9 @@ internal static class ChatHistory
 
         if (publicIds.Length > 0)
         {
-            var firstPost = messages.Where(x => x.Message.Date > 0).MinBy(x => x.Message.Date) ?? messages.MinBy(x => x.Message.Id)!;
-            var lastPost = messages.Where(x => x.Message.Date > 0).MaxBy(x => x.Message.Date) ?? messages.MaxBy(x => x.Message.Id)!;
+            var channelMessages = messages.Where(x => history.ChannelChats.Contains(x.SourceChatId)).ToArray();
+            var firstPost = channelMessages.Where(x => x.Message.Date > 0).MinBy(x => x.Message.Date) ?? channelMessages.MinBy(x => x.Message.Id)!;
+            var lastPost = channelMessages.Where(x => x.Message.Date > 0).MaxBy(x => x.Message.Date) ?? channelMessages.MaxBy(x => x.Message.Id)!;
             var latestPublicId = publicIds[^1];
             var missing = missingPublicIds.ToArray();
             manifest["public_id_range"] = new JObject

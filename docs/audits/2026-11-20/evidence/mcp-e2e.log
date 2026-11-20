@@ -1,0 +1,4 @@
+PASS published stdio 2026-07-28
+PASS published stdio legacy 2025-11-25
+PASS published stdio 2026-07-28
+PASS isolated client installation E2E (10 configurations)

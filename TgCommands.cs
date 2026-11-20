@@ -32,7 +32,7 @@ public sealed class TgCommands
         var version = await tg.Client.GetOptionAsync("version");
         var payload = new JObject
         {
-            ["healthy"] = true,
+            ["healthy"] = tg.IsConnected,
             ["checked_at"] = DateTimeOffset.UtcNow.ToString("O"),
             ["latency_ms"] = (DateTimeOffset.UtcNow - started).TotalMilliseconds,
             ["tdlib_version"] = version?.GetType().GetProperty("Value")?.GetValue(version)?.ToString(),
@@ -48,7 +48,8 @@ public sealed class TgCommands
             ["database_size_bytes"] = Directory.Exists(tg.DatabaseDirectory)
                 ? Directory.EnumerateFiles(tg.DatabaseDirectory, "*", SearchOption.AllDirectories).Sum(path => new FileInfo(path).Length)
                 : 0,
-            ["network_available"] = true
+            ["network_available"] = tg.IsConnected,
+            ["connection_state"] = tg.ConnectionState
         };
         Console.WriteLine(format.Trim().ToLowerInvariant() switch
         {
@@ -966,7 +967,7 @@ public sealed class ChatCommands
         string? session = null,
         CancellationToken cancellationToken = default)
     {
-        await using var tg = await TelegramSession.CreateReadyAsync(session, lockTimeout, noWait);
+        await using var tg = await TelegramSession.CreateReadyAsync(session, lockTimeout, noWait, local: local);
         if (topicId < 0)
         {
             throw new ArgumentException("--topic-id must be zero or greater.", nameof(topicId));
@@ -1168,7 +1169,7 @@ public sealed class ChatCommands
         CancellationToken cancellationToken = default)
     {
         await using var transcription = TranscriptionCommands.Create(transcribe, transcribeLanguage, transcribeCommand);
-        await using var tg = await TelegramSession.CreateReadyAsync(session);
+        await using var tg = await TelegramSession.CreateReadyAsync(session, local: local);
         var chat = await tg.Client.GetChatAsync(chatId).WaitAsync(cancellationToken);
         all = all || allHistory;
         var history = await ChatHistory.FetchAsync(tg, chatId, all, local, maxPages, followMigrations: all, cancellationToken: cancellationToken);
@@ -1297,7 +1298,7 @@ public sealed class ChatCommands
         string? session = null,
         CancellationToken cancellationToken = default)
     {
-        await using var tg = await TelegramSession.CreateReadyAsync(session, lockTimeout, noWait);
+        await using var tg = await TelegramSession.CreateReadyAsync(session, lockTimeout, noWait, local: local);
         var payload = await TelegramOperations.StatsAsync(tg, chatId, topicId, type, maxPages, local, requestTimeout, cancellationToken);
 
         Console.WriteLine(format.Trim().ToLowerInvariant() switch

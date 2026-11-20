@@ -1,0 +1,932 @@
+
+================================================================================
+$ /home/andrii/.local/bin/tgcli --help
+EXIT: 0
+STDOUT:
+Usage: [command] [-h|--help] [--version]
+
+Commands:
+  bot create            Create a bot managed by BotFather.
+  bot list              List bots owned by the current account.
+  bot remove            Remove a bot through BotFather's delete flow.
+  bot token             Print or revoke the token for a bot managed by the current account.
+  bot write             Send a message to a bot and optionally press an inline UI button.
+  channel comments      Export comments for one channel post or for all fetched channel posts.
+  channel metrics       Export per-post channel metrics and optional aggregates.
+  chat context          Return messages around a target and optionally follow its reply chain.
+  chat export           Export chat history to Markdown, JSONL, or TSV; add --transcribe for embedded speech-to-text.
+  chat list             List chats from the main chat list.
+  chat messages         Print messages from a chat.
+  chat migrations       Inspect the complete basic-group to supergroup migration chain.
+  chat resolve          Resolve a public username to a chat.
+  chat search           Search messages inside a chat.
+  chat stats            Print chat boundary and aggregate statistics.
+  diagnostics           Print machine-readable session, TDLib, account, database, and network diagnostics.
+  download              Download a Telegram file by message, file id, or remote file id.
+  download-batch        Download many message attachments concurrently through one TDLib client.
+  forum topics          List forum topics in a supergroup.
+  link message          Build Telegram links for a message.
+  login                 Sign in to Telegram and persist the local TDLib session.
+  mcp                   Run a local MCP server over stdin/stdout. Login separately before using Telegram tools.
+  mcp install           Install tgcli MCP in all detected local clients of a family: claude, codex or copilot.
+  message get           Get one full message as JSON, including extracted files and links.
+  message transcribe    Download and transcribe a Telegram voice note, video note, audio or video attachment locally.
+  search                Search chats by title or username.
+  session export        Export the current Telegram authorization state as a compact secret.
+  session import        Import a Telegram authorization secret from stdin.
+  session status        Inspect the TDLib session lock without opening Telegram.
+  session unlock        Remove stale lock-owner metadata. Refuses while any process owns the OS lock.
+  transcribe            Transcribe a local audio or video file using the embedded multilingual Whisper model.
+
+STDERR:
+
+
+================================================================================
+$ /home/andrii/.local/bin/tgcli --version
+EXIT: 0
+STDOUT:
+7.0.1
+
+STDERR:
+
+
+================================================================================
+$ /home/andrii/.local/bin/tgcli bot --help
+EXIT: 0
+STDOUT:
+Usage: [command] [-h|--help] [--version]
+
+Commands:
+  bot create            Create a bot managed by BotFather.
+  bot list              List bots owned by the current account.
+  bot remove            Remove a bot through BotFather's delete flow.
+  bot token             Print or revoke the token for a bot managed by the current account.
+  bot write             Send a message to a bot and optionally press an inline UI button.
+  channel comments      Export comments for one channel post or for all fetched channel posts.
+  channel metrics       Export per-post channel metrics and optional aggregates.
+  chat context          Return messages around a target and optionally follow its reply chain.
+  chat export           Export chat history to Markdown, JSONL, or TSV; add --transcribe for embedded speech-to-text.
+  chat list             List chats from the main chat list.
+  chat messages         Print messages from a chat.
+  chat migrations       Inspect the complete basic-group to supergroup migration chain.
+  chat resolve          Resolve a public username to a chat.
+  chat search           Search messages inside a chat.
+  chat stats            Print chat boundary and aggregate statistics.
+  diagnostics           Print machine-readable session, TDLib, account, database, and network diagnostics.
+  download              Download a Telegram file by message, file id, or remote file id.
+  download-batch        Download many message attachments concurrently through one TDLib client.
+  forum topics          List forum topics in a supergroup.
+  link message          Build Telegram links for a message.
+  login                 Sign in to Telegram and persist the local TDLib session.
+  mcp                   Run a local MCP server over stdin/stdout. Login separately before using Telegram tools.
+  mcp install           Install tgcli MCP in all detected local clients of a family: claude, codex or copilot.
+  message get           Get one full message as JSON, including extracted files and links.
+  message transcribe    Download and transcribe a Telegram voice note, video note, audio or video attachment locally.
+  search                Search chats by title or username.
+  session export        Export the current Telegram authorization state as a compact secret.
+  session import        Import a Telegram authorization secret from stdin.
+  session status        Inspect the TDLib session lock without opening Telegram.
+  session unlock        Remove stale lock-owner metadata. Refuses while any process owns the OS lock.
+  transcribe            Transcribe a local audio or video file using the embedded multilingual Whisper model.
+
+STDERR:
+
+
+================================================================================
+$ /home/andrii/.local/bin/tgcli channel --help
+EXIT: 0
+STDOUT:
+Usage: [command] [-h|--help] [--version]
+
+Commands:
+  bot create            Create a bot managed by BotFather.
+  bot list              List bots owned by the current account.
+  bot remove            Remove a bot through BotFather's delete flow.
+  bot token             Print or revoke the token for a bot managed by the current account.
+  bot write             Send a message to a bot and optionally press an inline UI button.
+  channel comments      Export comments for one channel post or for all fetched channel posts.
+  channel metrics       Export per-post channel metrics and optional aggregates.
+  chat context          Return messages around a target and optionally follow its reply chain.
+  chat export           Export chat history to Markdown, JSONL, or TSV; add --transcribe for embedded speech-to-text.
+  chat list             List chats from the main chat list.
+  chat messages         Print messages from a chat.
+  chat migrations       Inspect the complete basic-group to supergroup migration chain.
+  chat resolve          Resolve a public username to a chat.
+  chat search           Search messages inside a chat.
+  chat stats            Print chat boundary and aggregate statistics.
+  diagnostics           Print machine-readable session, TDLib, account, database, and network diagnostics.
+  download              Download a Telegram file by message, file id, or remote file id.
+  download-batch        Download many message attachments concurrently through one TDLib client.
+  forum topics          List forum topics in a supergroup.
+  link message          Build Telegram links for a message.
+  login                 Sign in to Telegram and persist the local TDLib session.
+  mcp                   Run a local MCP server over stdin/stdout. Login separately before using Telegram tools.
+  mcp install           Install tgcli MCP in all detected local clients of a family: claude, codex or copilot.
+  message get           Get one full message as JSON, including extracted files and links.
+  message transcribe    Download and transcribe a Telegram voice note, video note, audio or video attachment locally.
+  search                Search chats by title or username.
+  session export        Export the current Telegram authorization state as a compact secret.
+  session import        Import a Telegram authorization secret from stdin.
+  session status        Inspect the TDLib session lock without opening Telegram.
+  session unlock        Remove stale lock-owner metadata. Refuses while any process owns the OS lock.
+  transcribe            Transcribe a local audio or video file using the embedded multilingual Whisper model.
+
+STDERR:
+
+
+================================================================================
+$ /home/andrii/.local/bin/tgcli chat --help
+EXIT: 0
+STDOUT:
+Usage: [command] [-h|--help] [--version]
+
+Commands:
+  bot create            Create a bot managed by BotFather.
+  bot list              List bots owned by the current account.
+  bot remove            Remove a bot through BotFather's delete flow.
+  bot token             Print or revoke the token for a bot managed by the current account.
+  bot write             Send a message to a bot and optionally press an inline UI button.
+  channel comments      Export comments for one channel post or for all fetched channel posts.
+  channel metrics       Export per-post channel metrics and optional aggregates.
+  chat context          Return messages around a target and optionally follow its reply chain.
+  chat export           Export chat history to Markdown, JSONL, or TSV; add --transcribe for embedded speech-to-text.
+  chat list             List chats from the main chat list.
+  chat messages         Print messages from a chat.
+  chat migrations       Inspect the complete basic-group to supergroup migration chain.
+  chat resolve          Resolve a public username to a chat.
+  chat search           Search messages inside a chat.
+  chat stats            Print chat boundary and aggregate statistics.
+  diagnostics           Print machine-readable session, TDLib, account, database, and network diagnostics.
+  download              Download a Telegram file by message, file id, or remote file id.
+  download-batch        Download many message attachments concurrently through one TDLib client.
+  forum topics          List forum topics in a supergroup.
+  link message          Build Telegram links for a message.
+  login                 Sign in to Telegram and persist the local TDLib session.
+  mcp                   Run a local MCP server over stdin/stdout. Login separately before using Telegram tools.
+  mcp install           Install tgcli MCP in all detected local clients of a family: claude, codex or copilot.
+  message get           Get one full message as JSON, including extracted files and links.
+  message transcribe    Download and transcribe a Telegram voice note, video note, audio or video attachment locally.
+  search                Search chats by title or username.
+  session export        Export the current Telegram authorization state as a compact secret.
+  session import        Import a Telegram authorization secret from stdin.
+  session status        Inspect the TDLib session lock without opening Telegram.
+  session unlock        Remove stale lock-owner metadata. Refuses while any process owns the OS lock.
+  transcribe            Transcribe a local audio or video file using the embedded multilingual Whisper model.
+
+STDERR:
+
+
+================================================================================
+$ /home/andrii/.local/bin/tgcli forum --help
+EXIT: 0
+STDOUT:
+Usage: [command] [-h|--help] [--version]
+
+Commands:
+  bot create            Create a bot managed by BotFather.
+  bot list              List bots owned by the current account.
+  bot remove            Remove a bot through BotFather's delete flow.
+  bot token             Print or revoke the token for a bot managed by the current account.
+  bot write             Send a message to a bot and optionally press an inline UI button.
+  channel comments      Export comments for one channel post or for all fetched channel posts.
+  channel metrics       Export per-post channel metrics and optional aggregates.
+  chat context          Return messages around a target and optionally follow its reply chain.
+  chat export           Export chat history to Markdown, JSONL, or TSV; add --transcribe for embedded speech-to-text.
+  chat list             List chats from the main chat list.
+  chat messages         Print messages from a chat.
+  chat migrations       Inspect the complete basic-group to supergroup migration chain.
+  chat resolve          Resolve a public username to a chat.
+  chat search           Search messages inside a chat.
+  chat stats            Print chat boundary and aggregate statistics.
+  diagnostics           Print machine-readable session, TDLib, account, database, and network diagnostics.
+  download              Download a Telegram file by message, file id, or remote file id.
+  download-batch        Download many message attachments concurrently through one TDLib client.
+  forum topics          List forum topics in a supergroup.
+  link message          Build Telegram links for a message.
+  login                 Sign in to Telegram and persist the local TDLib session.
+  mcp                   Run a local MCP server over stdin/stdout. Login separately before using Telegram tools.
+  mcp install           Install tgcli MCP in all detected local clients of a family: claude, codex or copilot.
+  message get           Get one full message as JSON, including extracted files and links.
+  message transcribe    Download and transcribe a Telegram voice note, video note, audio or video attachment locally.
+  search                Search chats by title or username.
+  session export        Export the current Telegram authorization state as a compact secret.
+  session import        Import a Telegram authorization secret from stdin.
+  session status        Inspect the TDLib session lock without opening Telegram.
+  session unlock        Remove stale lock-owner metadata. Refuses while any process owns the OS lock.
+  transcribe            Transcribe a local audio or video file using the embedded multilingual Whisper model.
+
+STDERR:
+
+
+================================================================================
+$ /home/andrii/.local/bin/tgcli link --help
+EXIT: 0
+STDOUT:
+Usage: [command] [-h|--help] [--version]
+
+Commands:
+  bot create            Create a bot managed by BotFather.
+  bot list              List bots owned by the current account.
+  bot remove            Remove a bot through BotFather's delete flow.
+  bot token             Print or revoke the token for a bot managed by the current account.
+  bot write             Send a message to a bot and optionally press an inline UI button.
+  channel comments      Export comments for one channel post or for all fetched channel posts.
+  channel metrics       Export per-post channel metrics and optional aggregates.
+  chat context          Return messages around a target and optionally follow its reply chain.
+  chat export           Export chat history to Markdown, JSONL, or TSV; add --transcribe for embedded speech-to-text.
+  chat list             List chats from the main chat list.
+  chat messages         Print messages from a chat.
+  chat migrations       Inspect the complete basic-group to supergroup migration chain.
+  chat resolve          Resolve a public username to a chat.
+  chat search           Search messages inside a chat.
+  chat stats            Print chat boundary and aggregate statistics.
+  diagnostics           Print machine-readable session, TDLib, account, database, and network diagnostics.
+  download              Download a Telegram file by message, file id, or remote file id.
+  download-batch        Download many message attachments concurrently through one TDLib client.
+  forum topics          List forum topics in a supergroup.
+  link message          Build Telegram links for a message.
+  login                 Sign in to Telegram and persist the local TDLib session.
+  mcp                   Run a local MCP server over stdin/stdout. Login separately before using Telegram tools.
+  mcp install           Install tgcli MCP in all detected local clients of a family: claude, codex or copilot.
+  message get           Get one full message as JSON, including extracted files and links.
+  message transcribe    Download and transcribe a Telegram voice note, video note, audio or video attachment locally.
+  search                Search chats by title or username.
+  session export        Export the current Telegram authorization state as a compact secret.
+  session import        Import a Telegram authorization secret from stdin.
+  session status        Inspect the TDLib session lock without opening Telegram.
+  session unlock        Remove stale lock-owner metadata. Refuses while any process owns the OS lock.
+  transcribe            Transcribe a local audio or video file using the embedded multilingual Whisper model.
+
+STDERR:
+
+
+================================================================================
+$ /home/andrii/.local/bin/tgcli mcp --help
+EXIT: 0
+STDOUT:
+Usage: mcp  [options...] [-h|--help] [--version]
+
+Run a local MCP server over stdin/stdout. Login separately before using Telegram tools.
+
+Options:
+  --session <string?>      [Default: null]
+  --lock-timeout <int>     [Default: 30]
+  --no-wait               
+
+STDERR:
+
+
+================================================================================
+$ /home/andrii/.local/bin/tgcli message --help
+EXIT: 0
+STDOUT:
+Usage: [command] [-h|--help] [--version]
+
+Commands:
+  bot create            Create a bot managed by BotFather.
+  bot list              List bots owned by the current account.
+  bot remove            Remove a bot through BotFather's delete flow.
+  bot token             Print or revoke the token for a bot managed by the current account.
+  bot write             Send a message to a bot and optionally press an inline UI button.
+  channel comments      Export comments for one channel post or for all fetched channel posts.
+  channel metrics       Export per-post channel metrics and optional aggregates.
+  chat context          Return messages around a target and optionally follow its reply chain.
+  chat export           Export chat history to Markdown, JSONL, or TSV; add --transcribe for embedded speech-to-text.
+  chat list             List chats from the main chat list.
+  chat messages         Print messages from a chat.
+  chat migrations       Inspect the complete basic-group to supergroup migration chain.
+  chat resolve          Resolve a public username to a chat.
+  chat search           Search messages inside a chat.
+  chat stats            Print chat boundary and aggregate statistics.
+  diagnostics           Print machine-readable session, TDLib, account, database, and network diagnostics.
+  download              Download a Telegram file by message, file id, or remote file id.
+  download-batch        Download many message attachments concurrently through one TDLib client.
+  forum topics          List forum topics in a supergroup.
+  link message          Build Telegram links for a message.
+  login                 Sign in to Telegram and persist the local TDLib session.
+  mcp                   Run a local MCP server over stdin/stdout. Login separately before using Telegram tools.
+  mcp install           Install tgcli MCP in all detected local clients of a family: claude, codex or copilot.
+  message get           Get one full message as JSON, including extracted files and links.
+  message transcribe    Download and transcribe a Telegram voice note, video note, audio or video attachment locally.
+  search                Search chats by title or username.
+  session export        Export the current Telegram authorization state as a compact secret.
+  session import        Import a Telegram authorization secret from stdin.
+  session status        Inspect the TDLib session lock without opening Telegram.
+  session unlock        Remove stale lock-owner metadata. Refuses while any process owns the OS lock.
+  transcribe            Transcribe a local audio or video file using the embedded multilingual Whisper model.
+
+STDERR:
+
+
+================================================================================
+$ /home/andrii/.local/bin/tgcli session --help
+EXIT: 0
+STDOUT:
+Usage: [command] [-h|--help] [--version]
+
+Commands:
+  bot create            Create a bot managed by BotFather.
+  bot list              List bots owned by the current account.
+  bot remove            Remove a bot through BotFather's delete flow.
+  bot token             Print or revoke the token for a bot managed by the current account.
+  bot write             Send a message to a bot and optionally press an inline UI button.
+  channel comments      Export comments for one channel post or for all fetched channel posts.
+  channel metrics       Export per-post channel metrics and optional aggregates.
+  chat context          Return messages around a target and optionally follow its reply chain.
+  chat export           Export chat history to Markdown, JSONL, or TSV; add --transcribe for embedded speech-to-text.
+  chat list             List chats from the main chat list.
+  chat messages         Print messages from a chat.
+  chat migrations       Inspect the complete basic-group to supergroup migration chain.
+  chat resolve          Resolve a public username to a chat.
+  chat search           Search messages inside a chat.
+  chat stats            Print chat boundary and aggregate statistics.
+  diagnostics           Print machine-readable session, TDLib, account, database, and network diagnostics.
+  download              Download a Telegram file by message, file id, or remote file id.
+  download-batch        Download many message attachments concurrently through one TDLib client.
+  forum topics          List forum topics in a supergroup.
+  link message          Build Telegram links for a message.
+  login                 Sign in to Telegram and persist the local TDLib session.
+  mcp                   Run a local MCP server over stdin/stdout. Login separately before using Telegram tools.
+  mcp install           Install tgcli MCP in all detected local clients of a family: claude, codex or copilot.
+  message get           Get one full message as JSON, including extracted files and links.
+  message transcribe    Download and transcribe a Telegram voice note, video note, audio or video attachment locally.
+  search                Search chats by title or username.
+  session export        Export the current Telegram authorization state as a compact secret.
+  session import        Import a Telegram authorization secret from stdin.
+  session status        Inspect the TDLib session lock without opening Telegram.
+  session unlock        Remove stale lock-owner metadata. Refuses while any process owns the OS lock.
+  transcribe            Transcribe a local audio or video file using the embedded multilingual Whisper model.
+
+STDERR:
+
+
+================================================================================
+$ /home/andrii/.local/bin/tgcli bot create --help
+EXIT: 0
+STDOUT:
+Usage: bot create [options...] [-h|--help] [--version]
+
+Create a bot managed by BotFather.
+
+Options:
+  --name <string>        Display name for the bot. [Required]
+  --username <string>    Bot username, with or without @. Must end in bot. [Required]
+  --format <string>      Output format: json, jsonl, tsv, plain. [Default: @"json"]
+  --session <string?>    Session directory. Defaults to ~/.local/share/tgcli. [Default: null]
+
+STDERR:
+
+
+================================================================================
+$ /home/andrii/.local/bin/tgcli bot list --help
+EXIT: 0
+STDOUT:
+Usage: bot list [options...] [-h|--help] [--version]
+
+List bots owned by the current account.
+
+Options:
+  --format <string>      Output format: json, jsonl, tsv, plain. [Default: @"tsv"]
+  --session <string?>    Session directory. Defaults to ~/.local/share/tgcli. [Default: null]
+
+STDERR:
+
+
+================================================================================
+$ /home/andrii/.local/bin/tgcli bot remove --help
+EXIT: 0
+STDOUT:
+Usage: bot remove [options...] [-h|--help] [--version]
+
+Remove a bot through BotFather's delete flow.
+
+Options:
+  --username <string>    Bot username, with or without @. [Required]
+  --confirm              Required to execute deletion.
+  --format <string>      Output format: json, jsonl, tsv, plain. [Default: @"json"]
+  --session <string?>    Session directory. Defaults to ~/.local/share/tgcli. [Default: null]
+
+STDERR:
+
+
+================================================================================
+$ /home/andrii/.local/bin/tgcli bot token --help
+EXIT: 0
+STDOUT:
+Usage: bot token [options...] [-h|--help] [--version]
+
+Print or revoke the token for a bot managed by the current account.
+
+Options:
+  --username <string>    Bot username, with or without @. [Required]
+  --revoke               Revoke the old token and print the new token.
+  --format <string>      Output format: json, jsonl, tsv, plain. [Default: @"plain"]
+  --session <string?>    Session directory. Defaults to ~/.local/share/tgcli. [Default: null]
+
+STDERR:
+
+
+================================================================================
+$ /home/andrii/.local/bin/tgcli bot write --help
+EXIT: 0
+STDOUT:
+Usage: bot write [options...] [-h|--help] [--version]
+
+Send a message to a bot and optionally press an inline UI button.
+
+Options:
+  --username <string>    Bot username, with or without @. [Required]
+  --text <string?>       Text to send. Use /start to start a bot. [Default: null]
+  --click <string?>      Inline button selector: button text or zero-based row,column such as 0,1. [Default: null]
+  --message-id <long>    Message id whose inline button should be pressed. Defaults to the latest bot message. [Default: 0]
+  --limit <int>          Recent messages to print after the interaction. [Default: 10]
+  --format <string>      Output format: json, jsonl, tsv, plain. [Default: @"json"]
+  --session <string?>    Session directory. Defaults to ~/.local/share/tgcli. [Default: null]
+
+STDERR:
+
+
+================================================================================
+$ /home/andrii/.local/bin/tgcli channel comments --help
+EXIT: 0
+STDOUT:
+Usage: channel comments [options...] [-h|--help] [--version]
+
+Export comments for one channel post or for all fetched channel posts.
+
+Options:
+  --chat-id <long>        [Required]
+  --post-id <long>        [Default: 0]
+  --all                  
+  --summary              
+  --format <string>       [Default: @"jsonl"]
+  --max-pages <int>       [Default: 1000]
+  --session <string?>     [Default: null]
+
+STDERR:
+
+
+================================================================================
+$ /home/andrii/.local/bin/tgcli channel metrics --help
+EXIT: 0
+STDOUT:
+Usage: channel metrics [options...] [-h|--help] [--version]
+
+Export per-post channel metrics and optional aggregates.
+
+Options:
+  --chat-id <long>           [Required]
+  --from-post-id <long>      [Default: 0]
+  --to-post-id <long>        [Default: 0]
+  --since-date <string?>     [Default: null]
+  --until-date <string?>     [Default: null]
+  --format <string>          [Default: @"jsonl"]
+  --max-pages <int>          [Default: 1000]
+  --local                   
+  --session <string?>        [Default: null]
+
+STDERR:
+
+
+================================================================================
+$ /home/andrii/.local/bin/tgcli chat context --help
+EXIT: 0
+STDOUT:
+Usage: chat context [options...] [-h|--help] [--version]
+
+Return messages around a target and optionally follow its reply chain.
+
+Options:
+  --chat-id <long>                [Required]
+  --message-id <long>             [Required]
+  --before <int>                  [Default: 5]
+  --after <int>                   [Default: 5]
+  --follow-reply-chain <bool>     [Default: true]
+  --format <string>               [Default: @"jsonl"]
+  --session <string?>             [Default: null]
+
+STDERR:
+
+
+================================================================================
+$ /home/andrii/.local/bin/tgcli chat export --help
+EXIT: 0
+STDOUT:
+Usage: chat export [options...] [-h|--help] [--version]
+
+Export chat history to Markdown, JSONL, or TSV; add --transcribe for embedded speech-to-text.
+
+Options:
+  --chat-id <long>                  Chat id from tgcli chat list/search/resolve. [Required]
+  --output <string>                 Destination file, or - for stdout. [Default: @"-"]
+  --format <string>                 Output format: md, jsonl, tsv. [Default: @"md"]
+  --all <bool>                      Fetch all pages until history ends or max-pages is reached. [Default: true]
+  --all-history                     
+  --max-pages <int>                 Maximum pages to fetch with --all. [Default: 1000]
+  --local                           Read local database only.
+  --include-links                   Include tg:// and https links for each exported message.
+  --resume                          
+  --incremental                     
+  --since-message-id <long>          [Default: 0]
+  --since-date <string?>             [Default: null]
+  --resume-token <string?>           [Default: null]
+  --fields <string?>                 [Default: null]
+  --transcribe-command <string?>    Optional external transcription executable, mutually exclusive with --transcribe. [Default: null]
+  --transcribe                      Transcribe voice notes, video notes, audio and video with the embedded model.
+  --transcribe-language <string>    Speech language code, or auto. [Default: @"auto"]
+  --expect-since <string?>           [Default: null]
+  --expect-count-min <int>           [Default: 0]
+  --fail-incomplete                 
+  --session <string?>               Session directory. Defaults to ~/.local/share/tgcli. [Default: null]
+
+STDERR:
+
+
+================================================================================
+$ /home/andrii/.local/bin/tgcli chat list --help
+EXIT: 0
+STDOUT:
+Usage: chat list [options...] [-h|--help] [--version]
+
+List chats from the main chat list.
+
+Options:
+  --limit <int>          Maximum number of chats to print. [Default: 50]
+  --format <string>      Output format: tsv, jsonl, md. [Default: @"tsv"]
+  --session <string?>    Session directory. Defaults to ~/.local/share/tgcli. [Default: null]
+
+STDERR:
+
+
+================================================================================
+$ /home/andrii/.local/bin/tgcli chat messages --help
+EXIT: 0
+STDOUT:
+Usage: chat messages [options...] [-h|--help] [--version]
+
+Print messages from a chat.
+
+Options:
+  --chat-id <long>            Chat id from tgcli chat list/search/resolve. [Required]
+  --topic-id <int>            Forum topic id. Use tgcli forum topics to list ids. [Default: 0]
+  --limit <int>               Maximum messages for a single page. [Default: 30]
+  --from-message-id <long>    Start before this message id. Use the oldest printed id as the next page cursor. [Default: 0]
+  --offset <int>              TDLib history offset, usually 0. [Default: 0]
+  --local                     Read local database only.
+  --all                       Fetch all pages until history ends or max-pages is reached.
+  --max-pages <int>           Maximum pages to fetch with --all. [Default: 1000]
+  --service-only              
+  --kind <string?>             [Default: null]
+  --format <string>           Output format: tsv, jsonl, md. [Default: @"tsv"]
+  --schema <string>           JSON/JSONL schema: simple or rich. [Default: @"simple"]
+  --request-timeout <int>      [Default: 60]
+  --lock-timeout <int>         [Default: 30]
+  --no-wait                   
+  --session <string?>         Session directory. Defaults to ~/.local/share/tgcli. [Default: null]
+
+STDERR:
+
+
+================================================================================
+$ /home/andrii/.local/bin/tgcli chat migrations --help
+EXIT: 0
+STDOUT:
+Usage: chat migrations [options...] [-h|--help] [--version]
+
+Inspect the complete basic-group to supergroup migration chain.
+
+Options:
+  --chat-id <long>        [Required]
+  --format <string>       [Default: @"json"]
+  --session <string?>     [Default: null]
+
+STDERR:
+
+
+================================================================================
+$ /home/andrii/.local/bin/tgcli chat resolve --help
+EXIT: 0
+STDOUT:
+Usage: chat resolve [options...] [-h|--help] [--version]
+
+Resolve a public username to a chat.
+
+Options:
+  --username <string>    Telegram username, with or without @. [Required]
+  --format <string>      Output format: tsv, jsonl, md. [Default: @"tsv"]
+  --session <string?>    Session directory. Defaults to ~/.local/share/tgcli. [Default: null]
+
+STDERR:
+
+
+================================================================================
+$ /home/andrii/.local/bin/tgcli chat search --help
+EXIT: 0
+STDOUT:
+Usage: chat search [options...] [-h|--help] [--version]
+
+Search messages inside a chat.
+
+Options:
+  --chat-id <long>            Chat id from tgcli chat list/search/resolve. [Required]
+  --topic-id <int>            Forum topic id. Use tgcli forum topics to list ids. [Default: 0]
+  --query <string>            Search text. Use an empty string with --type to search attachments. [Default: @""]
+  --queries <string?>         File with one search query per line. [Default: null]
+  --type <string>             Filter: all, voice, attach/document, audio, video, photo, animation, video-note. [Default: @"all"]
+  --limit <int>               Maximum messages for a single page. [Default: 30]
+  --from-message-id <long>    Start before this message id. Use the oldest printed id as the next page cursor. [Default: 0]
+  --offset <int>              TDLib search offset, usually 0. [Default: 0]
+  --all                       Fetch all pages until search results end or max-pages is reached.
+  --max-pages <int>           Maximum pages to fetch with --all. [Default: 1000]
+  --format <string>           Output format: tsv, jsonl, md. [Default: @"tsv"]
+  --service-only              
+  --kind <string?>             [Default: null]
+  --request-timeout <int>      [Default: 60]
+  --lock-timeout <int>         [Default: 30]
+  --no-wait                   
+  --session <string?>         Session directory. Defaults to ~/.local/share/tgcli. [Default: null]
+
+STDERR:
+
+
+================================================================================
+$ /home/andrii/.local/bin/tgcli chat stats --help
+EXIT: 0
+STDOUT:
+Usage: chat stats [options...] [-h|--help] [--version]
+
+Print chat boundary and aggregate statistics.
+
+Options:
+  --chat-id <long>            [Required]
+  --topic-id <int>            [Default: 0]
+  --type <string>             [Default: @"all"]
+  --max-pages <int>           [Default: 1000]
+  --local                    
+  --format <string>           [Default: @"json"]
+  --request-timeout <int>     [Default: 60]
+  --lock-timeout <int>        [Default: 30]
+  --no-wait                  
+  --session <string?>         [Default: null]
+
+STDERR:
+
+
+================================================================================
+$ /home/andrii/.local/bin/tgcli diagnostics --help
+EXIT: 0
+STDOUT:
+Usage: diagnostics [options...] [-h|--help] [--version]
+
+Print machine-readable session, TDLib, account, database, and network diagnostics.
+
+Options:
+  --format <string>        [Default: @"json"]
+  --lock-timeout <int>     [Default: 5]
+  --no-wait               
+  --session <string?>      [Default: null]
+
+STDERR:
+
+
+================================================================================
+$ /home/andrii/.local/bin/tgcli download --help
+EXIT: 0
+STDOUT:
+Usage: download [options...] [-h|--help] [--version]
+
+Download a Telegram file by message, file id, or remote file id.
+
+Options:
+  --type <string?>             File type: voice, attach/document, audio, video, photo, animation, video-note, file. Optional for --chat-id/--message-id. [Default: null]
+  --attachment-id <string?>    TDLib integer file id printed by search/messages, or a remote file id string. [Default: null]
+  --chat-id <long>             Chat id that contains the attachment. [Default: 0]
+  --message-id <long>          Message id that contains the attachment. [Default: 0]
+  --output <string>            Destination file or directory. Existing directories, paths ending with a separator, and missing extensionless paths are treated as directories. Defaults to the current directory. [Default: @"."]
+  --session <string?>          Session directory. Defaults to ~/.local/share/tgcli. [Default: null]
+
+STDERR:
+
+
+================================================================================
+$ /home/andrii/.local/bin/tgcli download-batch --help
+EXIT: 0
+STDOUT:
+Usage: download-batch [options...] [-h|--help] [--version]
+
+Download many message attachments concurrently through one TDLib client.
+
+Options:
+  --input <string>       JSONL file with chat_id and message_id per row, or - for stdin. [Required]
+  --type <string?>       Attachment type applied to every row. If omitted, each row may provide type. [Default: null]
+  --output <string>      Destination directory. Defaults to the current directory. [Default: @"."]
+  --parallel <int>       Maximum concurrent downloads, from 1 to 32. [Default: 4]
+  --format <string>      Output format: jsonl or plain. [Default: @"jsonl"]
+  --session <string?>    Session directory. Defaults to ~/.local/share/tgcli. [Default: null]
+
+STDERR:
+
+
+================================================================================
+$ /home/andrii/.local/bin/tgcli forum topics --help
+EXIT: 0
+STDOUT:
+Usage: forum topics [options...] [-h|--help] [--version]
+
+List forum topics in a supergroup.
+
+Options:
+  --chat-id <long>            [Required]
+  --query <string>            [Default: @""]
+  --limit <int>               [Default: 100]
+  --all                      
+  --max-pages <int>           [Default: 100]
+  --format <string>           [Default: @"jsonl"]
+  --request-timeout <int>     [Default: 60]
+  --lock-timeout <int>        [Default: 30]
+  --no-wait                  
+  --session <string?>         [Default: null]
+
+STDERR:
+
+
+================================================================================
+$ /home/andrii/.local/bin/tgcli link message --help
+EXIT: 0
+STDOUT:
+Usage: link message [options...] [-h|--help] [--version]
+
+Build Telegram links for a message.
+
+Options:
+  --chat-id <long>       Chat id that contains the message. [Required]
+  --message-id <long>    Message id. [Required]
+  --format <string>      Output format: json, jsonl, tsv, plain. [Default: @"json"]
+  --session <string?>    Session directory. Defaults to ~/.local/share/tgcli. [Default: null]
+
+STDERR:
+
+
+================================================================================
+$ /home/andrii/.local/bin/tgcli login --help
+EXIT: 0
+STDOUT:
+Usage: login [options...] [-h|--help] [--version]
+
+Sign in to Telegram and persist the local TDLib session.
+
+Options:
+  --api-id <int>          Telegram API id. Can also be set with TGCLI_API_ID. [Default: 0]
+  --api-hash <string?>    Telegram API hash. Can also be set with TGCLI_API_HASH. [Default: null]
+  --phone <string?>       Phone number in international format. If omitted, tgcli prompts. [Default: null]
+  --session <string?>     Session directory. Defaults to ~/.local/share/tgcli. [Default: null]
+
+STDERR:
+
+
+================================================================================
+$ /home/andrii/.local/bin/tgcli mcp install --help
+EXIT: 0
+STDOUT:
+Usage: mcp install [arguments...] [options...] [-h|--help] [--version]
+
+Install tgcli MCP in all detected local clients of a family: claude, codex or copilot.
+
+Arguments:
+  [0] <string>    Client family: claude, codex or copilot.
+
+Options:
+  --session <string?>              Telegram session directory to use from every client. [Default: null]
+  --dry-run                        Inspect and validate installation without changing client configuration.
+  --eclipse-workspace <string?>    Additional Eclipse workspace to configure for Copilot. [Default: null]
+
+STDERR:
+
+
+================================================================================
+$ /home/andrii/.local/bin/tgcli message get --help
+EXIT: 0
+STDOUT:
+Usage: message get [options...] [-h|--help] [--version]
+
+Get one full message as JSON, including extracted files and links.
+
+Options:
+  --chat-id <long>       Chat id that contains the message. [Required]
+  --message-id <long>    Message id. [Required]
+  --format <string>       [Default: @"json"]
+  --session <string?>    Session directory. Defaults to ~/.local/share/tgcli. [Default: null]
+
+STDERR:
+
+
+================================================================================
+$ /home/andrii/.local/bin/tgcli message transcribe --help
+EXIT: 0
+STDOUT:
+Usage: message transcribe [options...] [-h|--help] [--version]
+
+Download and transcribe a Telegram voice note, video note, audio or video attachment locally.
+
+Options:
+  --chat-id <long>       Chat id containing the media message. [Required]
+  --message-id <long>    TDLib message id. [Required]
+  --language <string>    Speech language code, for example uk or en; auto detects the language. [Default: @"auto"]
+  --format <string>      Output format: json, jsonl or plain. [Default: @"json"]
+  --session <string?>    Session directory. Defaults to ~/.local/share/tgcli. [Default: null]
+
+STDERR:
+
+
+================================================================================
+$ /home/andrii/.local/bin/tgcli search --help
+EXIT: 0
+STDOUT:
+Usage: search [options...] [-h|--help] [--version]
+
+Search chats by title or username.
+
+Options:
+  --query <string>       Search text. [Required]
+  --limit <int>          Maximum number of chats to print. [Default: 20]
+  --server               Also ask Telegram servers for public chats.
+  --format <string>      Output format: tsv, jsonl, md. [Default: @"tsv"]
+  --session <string?>    Session directory. Defaults to ~/.local/share/tgcli. [Default: null]
+
+STDERR:
+
+
+================================================================================
+$ /home/andrii/.local/bin/tgcli session export --help
+EXIT: 0
+STDOUT:
+Usage: session export [options...] [-h|--help] [--version]
+
+Export the current Telegram authorization state as a compact secret.
+
+Options:
+  --session <string?>    Session directory. Defaults to ~/.local/share/tgcli. [Default: null]
+
+STDERR:
+
+
+================================================================================
+$ /home/andrii/.local/bin/tgcli session import --help
+EXIT: 0
+STDOUT:
+Usage: session import [options...] [-h|--help] [--version]
+
+Import a Telegram authorization secret from stdin.
+
+Options:
+  --session <string?>    Session directory. Defaults to ~/.local/share/tgcli. [Default: null]
+  --force                Overwrite an existing session.
+
+STDERR:
+
+
+================================================================================
+$ /home/andrii/.local/bin/tgcli session status --help
+EXIT: 0
+STDOUT:
+Usage: session status [options...] [-h|--help] [--version]
+
+Inspect the TDLib session lock without opening Telegram.
+
+Options:
+  --format <string>       [Default: @"json"]
+  --session <string?>     [Default: null]
+
+STDERR:
+
+
+================================================================================
+$ /home/andrii/.local/bin/tgcli session unlock --help
+EXIT: 0
+STDOUT:
+Usage: session unlock [options...] [-h|--help] [--version]
+
+Remove stale lock-owner metadata. Refuses while any process owns the OS lock.
+
+Options:
+  --stale-only           
+  --session <string?>     [Default: null]
+
+STDERR:
+
+
+================================================================================
+$ /home/andrii/.local/bin/tgcli transcribe --help
+EXIT: 0
+STDOUT:
+Usage: transcribe [options...] [-h|--help] [--version]
+
+Transcribe a local audio or video file using the embedded multilingual Whisper model.
+
+Options:
+  --input <string>       Local audio/video path (WAV, OGG, MP3, M4A, MP4 and other FFmpeg formats). [Required]
+  --language <string>    Speech language code, for example uk or en; auto detects the language. [Default: @"auto"]
+  --format <string>      Output format: json (with timestamped segments), jsonl or plain. [Default: @"json"]
+
+STDERR:
+

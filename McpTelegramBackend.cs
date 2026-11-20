@@ -10,7 +10,7 @@ namespace TgCli;
 internal sealed class McpTelegramBackend(string? sessionDirectory, int lockTimeout, bool noWait) : IMcpTelegramBackend
 {
     private readonly McpSessionGate<TelegramSession> _sessions = new(
-        () => TelegramSession.CreateReadyAsync(sessionDirectory, lockTimeout, noWait));
+        () => TelegramSession.CreateReadyAsync(sessionDirectory, lockTimeout, noWait, local: true));
 
     public Task<JsonObject> ExecuteAsync(string name, McpArguments arguments, CancellationToken cancellationToken) =>
         _sessions.ExecuteAsync((tg, ct) => ExecuteCoreAsync(tg, name, arguments, ct),
@@ -18,6 +18,9 @@ internal sealed class McpTelegramBackend(string? sessionDirectory, int lockTimeo
 
     private static async Task<JsonObject> ExecuteCoreAsync(TelegramSession tg, string name, McpArguments a, CancellationToken ct)
     {
+        // A reused session may have disconnected since the previous call.
+        if (!((name is "chat_messages" or "chat_stats") && a.Bool("local")))
+            await tg.EnsureConnectedAsync(ct);
         var limit = a.Int("limit", 30);
         var cursor = McpCursor.Decode(a.Text("cursor"), a.Fingerprint(name));
         JsonObject result;
@@ -140,7 +143,7 @@ internal sealed class McpTelegramBackend(string? sessionDirectory, int lockTimeo
             case "diagnostics":
                 {
                     var me = await tg.Client.GetMeAsync();
-                    result = new() { ["healthy"] = true, ["user_id"] = Id(me.Id), ["display_name"] = $"{me.FirstName} {me.LastName}".Trim(), ["session_directory"] = tg.SessionDirectory, ["checked_at"] = DateTimeOffset.UtcNow.ToString("O") };
+                    result = new() { ["healthy"] = tg.IsConnected, ["network_available"] = tg.IsConnected, ["connection_state"] = tg.ConnectionState, ["user_id"] = Id(me.Id), ["display_name"] = $"{me.FirstName} {me.LastName}".Trim(), ["session_directory"] = tg.SessionDirectory, ["checked_at"] = DateTimeOffset.UtcNow.ToString("O") };
                     break;
                 }
             default: throw new ArgumentException("Unknown Telegram operation.");

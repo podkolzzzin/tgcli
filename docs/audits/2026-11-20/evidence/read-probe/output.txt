@@ -1,0 +1,8 @@
+forum_short_page: complete=True, reason=short_page, count=1, requests=0, unused_pages=2
+forum_bounded: complete=True, reason=page_complete, count=1
+migration_basic_has_upgrade=True, full_info_has_upgrade=False
+migration_reflection_full_info_value=null
+service_only_accepts_non_service_ids=1,2,3
+local_cache_exhausted: complete=True, reason=history_exhausted, count=1
+metric_aggregate_exception=OverflowException
+group_link=tg://openmessage?user_id=-1001234567890&message_id=42

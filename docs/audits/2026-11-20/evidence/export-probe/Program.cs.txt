@@ -1,0 +1,51 @@
+using TgCli;
+using TdLib;
+using Newtonsoft.Json.Linq;
+
+var video = new TdApi.Message { ChatId = 1, Id = 2, Content = new TdApi.MessageContent.MessageVideo { Video = new TdApi.Video {
+ FileName = "lecture.mp4", MimeType = "video/mp4", Width = 1920, Height = 1080, Duration = 42,
+ Video_ = new TdApi.File { Id = 10, Size = 100 },
+ Thumbnail = new TdApi.Thumbnail { Width = 320, Height = 180, File = new TdApi.File { Id = 11, Size = 12 } }
+} } };
+var primary = MessageFiles.GetPrimaryAttachment(video.Content)!;
+Console.WriteLine("ACTUAL_HELPER primary=" + ExportSchema.ToAttachmentJson(primary,"",null).ToString(Newtonsoft.Json.Formatting.None));
+foreach(var f in MessageFiles.GetAllFiles(video))
+ Console.WriteLine("ACTUAL_HELPER export-file=" + ExportSchema.ToAttachmentJson(f,"",null).ToString(Newtonsoft.Json.Formatting.None));
+var duplicates = BatchDownloads.Read(new StringReader("{\"chat_id\":1,\"message_id\":2,\"type\":\"video\"}\n{\"chat_id\":1,\"message_id\":2,\"type\":\"file\"}"), null);
+Console.WriteLine($"ACTUAL_HELPER alias-duplicates accepted={duplicates.Count}; sameDestination={BatchDownloads.ResolveDestination("/tmp/probe-out", duplicates[0],primary.File)==BatchDownloads.ResolveDestination("/tmp/probe-out", duplicates[1],primary.File)}");
+var localHistory = await ChatHistory.FetchPagesAsync([1], true, true, 100, (_,_)=>Task.FromResult(new TdApi.Messages { Messages_ = [] }), _=>Task.FromResult(false));
+Console.WriteLine($"ACTUAL_HELPER empty-local-history complete={localHistory.Complete}; termination={localHistory.TerminationReason}");
+var emptyManifest = ChatHistory.BuildManifest(localHistory);
+try { ChatHistory.ValidateManifest(emptyManifest, DateTimeOffset.Parse("2020-01-01T00:00:00Z"), 0, true); Console.WriteLine("ACTUAL_HELPER empty-expect-since: ACCEPTED"); }
+catch(Exception e) { Console.WriteLine("ACTUAL_HELPER empty-expect-since: " + e.Message); }
+// Literal control-flow replay of TgCommands.cs:1218-1253; no native/client construction.
+var cache = new List<JObject> { new JObject { ["chat_id"]=1, ["message_id"]=2, ["text"]="old" } };
+List<JObject> Replay(List<JObject> current, List<JObject> incoming) {
+ var keys=current.Select(x=>(x.Value<long>("chat_id"),x.Value<long>("message_id"))).ToHashSet();
+ var fetched=incoming.Select(x=>(x.Value<long>("chat_id"),x.Value<long>("message_id"))).ToHashSet();
+ incoming.RemoveAll(x=>keys.Contains((x.Value<long>("chat_id"),x.Value<long>("message_id"))));
+ var deleted=keys.Except(fetched).ToArray();
+ var result=current.Concat(incoming).Concat(deleted.Select(x=>ExportSchema.Tombstone(x.Item1,x.Item2))).ToList();
+ Console.WriteLine($"SOURCE_REPLAY actualRows={result.Count}; reportedRows={keys.Count+incoming.Count+deleted.Length}; new={incoming.Count}; tombstones={deleted.Length}; text={result[0].Value<string>("text")}");
+ return result;
+}
+Replay(cache, [new JObject { ["chat_id"]=1, ["message_id"]=2,["text"]="edited" }]);
+var deletedOnce=Replay(cache, []);
+Replay(deletedOnce, []);
+var token="wrong-chat:900"; var parts=token.Split(':',2); long since=0;
+Console.WriteLine($"SOURCE_REPLAY resume-token={token}; accepted={parts.Length==2 && long.TryParse(parts[1],out since)}; since={since}");
+var projected = (JObject)typeof(Output).GetMethod("SelectFields", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!.Invoke(null, [new JObject{["schema"]="tgcli.message",["schema_version"]="5.0",["chat_id"]=1,["message_id"]=2,["text"]="hi"},"text"])!;
+Console.WriteLine($"ACTUAL_HELPER identity-free-projection={projected.ToString(Newtonsoft.Json.Formatting.None)}; subsequent-cache-key={projected.Value<long>("chat_id")}:{projected.Value<long>("message_id")}");
+using (var cancellation=new CancellationTokenSource()) {
+ var inFlight = new TaskCompletionSource<TdApi.Messages>();
+ var fetch=ChatHistory.FetchPagesAsync([1],true,false,100,(_,_)=>inFlight.Task,_=>Task.FromResult(false),cancellation.Token);
+ cancellation.Cancel();
+ await Task.Delay(100);
+ Console.WriteLine($"ACTUAL_HELPER cancelled-in-flight-fetch completed={fetch.IsCompleted}");
+ inFlight.SetResult(new TdApi.Messages{Messages_=[]});
+ var finished=await fetch;
+ Console.WriteLine($"ACTUAL_HELPER cancelled-in-flight-fetch subsequently-returned-success={finished.Complete}");
+}
+var tokenText="12345:abcdefghijklmnopqrstu-";
+var parsedToken=typeof(BotCommands).GetMethod("ExtractToken",System.Reflection.BindingFlags.NonPublic|System.Reflection.BindingFlags.Static)!.Invoke(null,[tokenText]);
+Console.WriteLine($"ACTUAL_HELPER bot-token source={tokenText}; parsed={parsedToken}");

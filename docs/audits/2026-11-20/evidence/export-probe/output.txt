@@ -1,0 +1,14 @@
+ACTUAL_HELPER primary={"kind":"video","file_id":10,"remote_id":null,"unique_id":null,"file_name":"lecture.mp4","mime_type":"video/mp4","width":1920,"height":1080,"duration":42,"size":100,"caption":"","download_state":"unknown","local_path":null,"generated_text":null}
+ACTUAL_HELPER export-file={"kind":"video","file_id":11,"remote_id":null,"unique_id":null,"file_name":null,"mime_type":null,"width":null,"height":null,"duration":null,"size":12,"caption":"","download_state":"unknown","local_path":null,"generated_text":null}
+ACTUAL_HELPER export-file={"kind":"video","file_id":10,"remote_id":null,"unique_id":null,"file_name":null,"mime_type":null,"width":null,"height":null,"duration":null,"size":100,"caption":"","download_state":"unknown","local_path":null,"generated_text":null}
+ACTUAL_HELPER alias-duplicates accepted=2; sameDestination=True
+ACTUAL_HELPER empty-local-history complete=True; termination=history_exhausted
+ACTUAL_HELPER empty-expect-since: ACCEPTED
+SOURCE_REPLAY actualRows=1; reportedRows=1; new=0; tombstones=0; text=old
+SOURCE_REPLAY actualRows=2; reportedRows=2; new=0; tombstones=1; text=old
+SOURCE_REPLAY actualRows=3; reportedRows=2; new=0; tombstones=1; text=old
+SOURCE_REPLAY resume-token=wrong-chat:900; accepted=True; since=900
+ACTUAL_HELPER identity-free-projection={"schema":"tgcli.message","schema_version":"5.0","text":"hi"}; subsequent-cache-key=0:0
+ACTUAL_HELPER cancelled-in-flight-fetch completed=False
+ACTUAL_HELPER cancelled-in-flight-fetch subsequently-returned-success=True
+ACTUAL_HELPER bot-token source=12345:abcdefghijklmnopqrstu-; parsed=12345:abcdefghijklmnopqrstu

@@ -1,0 +1,5 @@
+PASS standalone embedded transcription: .wav
+PASS standalone embedded transcription: .ogg
+PASS standalone embedded transcription: .mp3
+PASS standalone embedded transcription: .mp4
+PASS auto language, plain output, missing media and video without audio

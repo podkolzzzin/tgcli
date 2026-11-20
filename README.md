@@ -4,7 +4,9 @@ Small command-line tool for reading Telegram chats with TDLib.
 
 ## MCP
 
-Version 7.0.0 adds offline audio/video transcription with a multilingual Whisper model embedded in the binary, alongside the local MCP server and client installers.
+Version 7.0.1 fixes stale reads at startup: online commands wait up to 30 seconds for TDLib's connection/update synchronization, and fail explicitly if it cannot finish. Authorization restored from disk is not proof of a current connection. `--local` still reads the cache without this wait. MCP rechecks connection readiness before each online operation, including after reconnects. Diagnostics reports the observed connection state. Exports continue across short TDLib history pages until an empty page or an explicit safety bound; a short page alone is not proof that history is complete.
+
+Version 7.0.0 added offline audio/video transcription with a multilingual Whisper model embedded in the binary, alongside the local MCP server and client installers.
 
 ```bash
 tgcli mcp

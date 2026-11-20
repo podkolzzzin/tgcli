@@ -1,0 +1,15 @@
+  Determining projects to restore...
+  Restored /home/andrii/RiderProjects/tgcli/TgCli.Tests/TgCli.Tests.csproj (in 1.75 sec).
+  Restored /home/andrii/RiderProjects/tgcli/TgCli.csproj (in 1.75 sec).
+  Restored /home/andrii/RiderProjects/tgcli/TgCli.Tests/McpTestServer/McpTestServer.csproj (in 1.75 sec).
+  TgCli -> /home/andrii/RiderProjects/tgcli/bin/Debug/net10.0/tgcli.dll
+  McpTestServer -> /home/andrii/RiderProjects/tgcli/TgCli.Tests/McpTestServer/bin/Debug/net10.0/TgCli.McpTestServer.dll
+  TgCli.Tests -> /home/andrii/RiderProjects/tgcli/TgCli.Tests/bin/Debug/net10.0/TgCli.Tests.dll
+Test run for /home/andrii/RiderProjects/tgcli/TgCli.Tests/bin/Debug/net10.0/TgCli.Tests.dll (.NETCoreApp,Version=v10.0)
+VSTest version 18.0.1 (x64)
+
+Starting test execution, please wait...
+A total of 1 test files matched the specified pattern.
+Results File: /tmp/tgcli-audit-2026-11-20/test-results/audit.trx
+
+Passed!  - Failed:     0, Passed:   113, Skipped:     0, Total:   113, Duration: 6 s - TgCli.Tests.dll (net10.0)

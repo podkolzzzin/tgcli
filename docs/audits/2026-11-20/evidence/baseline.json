@@ -1,0 +1,24 @@
+{
+  "date": "2026-11-20",
+  "head": "20f3bb4e817f206c5723d0d6da96442baac46b82",
+  "sdk": "10.0.101",
+  "installed_version": "7.0.1",
+  "installed_binary_sha256": "3afa02463739a117fd1c7f50a0eef043c894f5190bbf846a1055834bad72f2d3",
+  "public_release": {
+    "tag_name": "v7.0.0",
+    "published_at": "2026-11-03T20:05:44Z",
+    "html_url": "https://github.com/podkolzzzin/tgcli/releases/tag/v7.0.0"
+  },
+  "initial_changed_file_hashes": {
+    "ExportSupport.cs": "5a0315474f04a49d420b5f829608e84659d7ac010dbdc10e9fb203c542156851",
+    "McpTelegramBackend.cs": "543dee3889ea0014b7cfb266fa4c80919f06649a9306442b383d399f5d6a3134",
+    "README.md": "b9c46687556e3b4590fdeeff4e2195de1523eaeec3258cbd37a2d983c36451cd",
+    "TelegramSession.cs": "534094f162042092d7c7aa93f69b571c99cc1936fddc8147735ad78e567dc83d",
+    "TgCli.Tests/ExportTests.cs": "e45b06aa583d711604d2c381bb7cdd710ee143a3c6a286aa55393aaf644d9226",
+    "TgCli.csproj": "bbd4919e4e9adf1df084d3f4eab4b76bf9ac195bb6a15fb3a37453a61bf417a5",
+    "TgCommands.cs": "d014af1cc9a345683225ea1c7508f2c8cb713dcfafb449d0df975086b6e24031",
+    "TelegramConnection.cs": "b6e35817b1daa620491ecc6f88fa1e6103ff86d96e72a63a2455ef0384ecf83e",
+    "TgCli.Tests/ChatHistoryTests.cs": "e6256a33036ac000e919d7b78be9d585386da0bf842fc5c2c5ebd8f8fbd929eb",
+    "TgCli.Tests/TelegramConnectionTests.cs": "dce605c838cd4f769f35eb593ab729aa4409f52e162be1db6ca61de5be30b4cb"
+  }
+}

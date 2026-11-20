@@ -1,0 +1,27 @@
+using TgCli;
+var root = Path.Combine(Path.GetTempPath(), "tgcli-installer-audit-" + Guid.NewGuid().ToString("N"));
+Directory.CreateDirectory(root);
+try {
+  Directory.CreateDirectory(Path.Combine(root, ".copilot"));
+  Directory.CreateDirectory(Path.Combine(root, ".eclipse"));
+  var registry = Path.Combine(root, ".eclipse", "org.eclipse.ui.ide.prefs");
+  File.WriteAllText(registry, "RECENT_WORKSPACES=a\nRECENT_WORKSPACES=b\n");
+  try {
+    var targets = McpClientDiscovery.Find("copilot", new(root, "linux", new Dictionary<string,string>()));
+    Console.WriteLine("discovery returned " + targets.Count + " targets");
+  } catch (Exception ex) { Console.WriteLine("discovery exception=" + ex.GetType().Name + " base=" + ex.GetType().BaseType?.Name + " message=" + ex.Message); }
+  var original = "mcp {\"servers\":{\"tgcli\":{\"command\":\"existing\",\"args\":[]}}}\n";
+  var launch = new McpLaunch("/new/tgcli", ["mcp"]);
+  var merged = McpConfiguration.Merge(original, McpConfigFormat.EclipsePreferences, "servers", launch);
+  Console.WriteLine("whitespace property original recognized=" + (McpConfiguration.ReadEntry(original, McpConfigFormat.EclipsePreferences, "servers") is not null));
+  Console.WriteLine("merged contains original=" + merged.Contains(original.TrimEnd()) + " new-entry=" + launch.Matches(McpConfiguration.ReadEntry(merged, McpConfigFormat.EclipsePreferences, "servers")));
+  Console.WriteLine("merged=" + System.Text.Json.JsonSerializer.Serialize(merged));
+  var p1 = Path.Combine(root, "nonexec"); var p2 = Path.Combine(root, "exec");
+  Directory.CreateDirectory(p1); Directory.CreateDirectory(p2);
+  File.WriteAllText(Path.Combine(p1,"codex"), "not executable");
+  File.WriteAllText(Path.Combine(p2,"codex"), "#!/bin/sh\nexit 0\n");
+  File.SetUnixFileMode(Path.Combine(p1,"codex"), UnixFileMode.UserRead | UnixFileMode.UserWrite);
+  File.SetUnixFileMode(Path.Combine(p2,"codex"), UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+  var selected = new McpInstallEnvironment(root,"linux",new Dictionary<string,string>{{"PATH", p1 + ":" + p2}}).Executable("codex");
+  Console.WriteLine("path picks non-executable=" + (selected == Path.Combine(p1,"codex")));
+} finally { Directory.Delete(root, true); }

@@ -1,0 +1,31 @@
+using System.Reflection;
+using System.IO.Compression;
+using System.Text;
+using TgCli;
+
+var root=Path.Combine(Path.GetTempPath(), "tgcli-probe-"+Guid.NewGuid().ToString("N"));
+Directory.CreateDirectory(root);
+try {
+var configType=typeof(TelegramSession).GetNestedType("SessionConfig",BindingFlags.NonPublic)!;
+var config=Activator.CreateInstance(configType)!;
+configType.GetProperty("RootDirectory")!.SetValue(config, root);
+Directory.CreateDirectory(Path.Combine(root,"tdlib.lock.owner"));
+try { await (Task)typeof(TelegramSession).GetMethod("AcquireLockAsync", BindingFlags.NonPublic|BindingFlags.Static)!.Invoke(null,[config, TimeSpan.Zero])!; }
+catch(Exception e) { Console.WriteLine("acquire_failure="+e.GetType().Name); }
+try { using var test=new FileStream(Path.Combine(root,"tdlib.lock"),FileMode.Open,FileAccess.ReadWrite,FileShare.None); Console.WriteLine("lock_released=True"); }
+catch(IOException) { Console.WriteLine("lock_released=False"); }
+var importRoot=Path.Combine(root,"import"); Directory.CreateDirectory(importRoot); File.WriteAllText(Path.Combine(importRoot,"existing-sentinel"),"saved");
+using var payload=new MemoryStream();
+using(var zip=new ZipArchive(payload,ZipArchiveMode.Create,true)) {
+ foreach(var pair in new[]{("manifest.json","{\"Format\":\"tgcli.session\",\"Version\":1}"),("config.json","definitely not JSON"),("tdlib-db/td.binlog","not a TDLib auth database")}) {
+  using var writer=new StreamWriter(zip.CreateEntry(pair.Item1).Open()); writer.Write(pair.Item2);
+ }
+}
+try { SessionSecret.Import(Convert.ToBase64String(payload.ToArray()), importRoot,true); Console.WriteLine("invalid_import_accepted=True; original_preserved="+File.Exists(Path.Combine(importRoot,"existing-sentinel"))); }
+catch(Exception e) { Console.WriteLine("invalid_import_rejected="+e.GetType().Name); }
+var oldIn=Console.In; var oldOut=Console.Out; var eof=new RepeatedEof(); var output=new StringWriter(); Console.SetIn(eof); Console.SetOut(output);
+try { typeof(TelegramSession).GetMethod("Prompt",BindingFlags.NonPublic|BindingFlags.Static)!.Invoke(null,["Phone",false]); }
+catch(TargetInvocationException) {} finally { Console.SetIn(oldIn); Console.SetOut(oldOut); }
+Console.WriteLine("prompt_eof_reads="+eof.Reads+"; prompts="+output.ToString().Split("Phone:").Length);
+} finally { Directory.Delete(root,true); }
+sealed class RepeatedEof : StringReader { internal int Reads; public RepeatedEof():base(""){} public override string? ReadLine() { if(++Reads>10) throw new Exception("probe_limit"); return null; } }
