@@ -90,7 +90,7 @@ public sealed class TgCommands
     /// <summary>
     /// Download a Telegram file by message, file id, or remote file id.
     /// </summary>
-    /// <param name="type">File type: voice, attach/document, audio, video, photo, animation, video-note, file. Optional for --chat-id/--message-id.</param>
+    /// <param name="type">File type: voice, attach/document, audio, video, photo, animation, video-note, thumbnail, file. Optional for --chat-id/--message-id.</param>
     /// <param name="attachmentId">TDLib integer file id printed by search/messages, or a remote file id string.</param>
     /// <param name="chatId">Chat id that contains the attachment.</param>
     /// <param name="messageId">Message id that contains the attachment.</param>
@@ -121,7 +121,7 @@ public sealed class TgCommands
     /// <summary>
     /// Download many message attachments concurrently through one TDLib client.
     /// </summary>
-    /// <param name="input">JSONL file with chat_id and message_id per row, or - for stdin.</param>
+    /// <param name="input">JSONL with one record per message (chat_id, message_id and optional attachment_id), or - for stdin.</param>
     /// <param name="type">Attachment type applied to every row. If omitted, each row may provide type.</param>
     /// <param name="output">Destination directory. Defaults to the current directory.</param>
     /// <param name="parallel">Maximum concurrent downloads, from 1 to 32.</param>
@@ -157,72 +157,25 @@ public sealed class TgCommands
         var outputDirectory = Path.GetFullPath(output);
         Directory.CreateDirectory(outputDirectory);
         await using var tg = await TelegramSession.CreateReadyAsync(session);
-        var results = new BatchDownloadResult[requests.Count];
-
-        await Parallel.ForEachAsync(
-            requests,
-            new ParallelOptions
-            {
-                MaxDegreeOfParallelism = parallel,
-                CancellationToken = cancellationToken
-            },
-            async (request, _) =>
-            {
-                try
-                {
-                    var file = await ResolveDownloadFileAsync(
-                        tg,
-                        request.Type,
-                        attachmentId: null,
-                        request.ChatId,
-                        request.MessageId);
-                    file = await DownloadFileWithRefreshAsync(
-                        tg,
-                        file,
-                        request.Type,
-                        request.ChatId,
-                        request.MessageId);
-
-                    if (string.IsNullOrWhiteSpace(file.Local?.Path) || !File.Exists(file.Local.Path))
-                    {
-                        throw new InvalidOperationException($"TDLib did not provide a downloaded local path for file_id={file.Id}.");
-                    }
-
-                    var destination = BatchDownloads.ResolveDestination(outputDirectory, request, file);
-                    File.Copy(file.Local.Path, destination, overwrite: true);
-                    results[request.Index] = new BatchDownloadResult(
-                        request.Index,
-                        request.ChatId,
-                        request.MessageId,
-                        file.Id,
-                        destination,
-                        Error: null);
-                }
-                catch (Exception ex) when (ex is not OperationCanceledException)
-                {
-                    results[request.Index] = new BatchDownloadResult(
-                        request.Index,
-                        request.ChatId,
-                        request.MessageId,
-                        FileId: null,
-                        Path: null,
-                        ex.Message);
-                }
-            });
+        var results = await BatchDownloads.RunAsync(requests, outputDirectory, parallel,
+            (request, token) => ResolveDownloadFileAsync(tg, request.Type, request.AttachmentId, request.ChatId, request.MessageId, token),
+            (request, file, token) => DownloadFileWithRefreshAsync(tg, file, request.Type, request.ChatId, request.MessageId, token),
+            cancellationToken);
 
         foreach (var result in results)
         {
             Console.WriteLine(normalizedFormat == "jsonl"
                 ? BatchDownloads.ToJson(result).ToString(Formatting.None)
                 : result.Ok
-                    ? result.Path
-                    : $"ERROR\t{result.ChatId}\t{result.MessageId}\t{result.Error}");
+                    ? $"{result.Status.ToUpperInvariant()}\t{result.Path}"
+                    : $"{result.Status.ToUpperInvariant()}\t{result.ChatId}\t{result.MessageId}\t{result.Error}");
         }
 
+        cancellationToken.ThrowIfCancellationRequested();
         var failed = results.Count(x => !x.Ok);
         if (failed > 0)
         {
-            throw new InvalidOperationException($"{failed} of {results.Length} batch downloads failed.");
+            throw new InvalidOperationException($"{failed} of {results.Count} batch downloads failed.");
         }
     }
 

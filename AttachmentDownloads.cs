@@ -14,7 +14,7 @@ internal static class AttachmentDownloads
         if (chatId == 0 && string.IsNullOrWhiteSpace(attachmentId))
             throw new ArgumentException("Provide a message identity or --attachment-id.");
         ParseNumericId(attachmentId);
-        return AttachmentKinds.Parse(type ?? "file");
+        return AttachmentKinds.Parse(type ?? "file", allowThumbnail: true);
     }
 
     public static async Task<DownloadSelection> SelectAsync(
@@ -30,7 +30,9 @@ internal static class AttachmentDownloads
         cancellationToken.ThrowIfCancellationRequested();
         attachmentId = string.IsNullOrWhiteSpace(attachmentId) ? null : attachmentId.Trim();
         var numericId = ParseNumericId(attachmentId);
-        var indexed = numericId is { } id ? await AttachmentIndex.ResolveAsync(sessionDirectory, id) : null;
+        var indexed = numericId is { } id
+            ? await AttachmentIndex.ResolveAsync(sessionDirectory, id)
+            : attachmentId is null ? null : await AttachmentIndex.ResolveRemoteAsync(sessionDirectory, attachmentId);
 
         if (chatId == 0 && indexed is { chat_id: not 0, message_id: not 0 })
             (chatId, messageId) = (indexed.chat_id, indexed.message_id);
@@ -42,7 +44,7 @@ internal static class AttachmentDownloads
             if (indexed is not null && (indexed.chat_id != chatId || indexed.message_id != messageId))
                 indexed = null;
 
-            var candidates = files.Where(file => AttachmentKinds.Matches(type, file.Kind));
+            var candidates = files.Where(file => AttachmentKinds.Matches(kind, file.Kind));
             if (attachmentId is null)
             {
                 candidates = candidates.Where(file => file.Role ==
@@ -109,8 +111,9 @@ internal static class AttachmentDownloads
         catch (TdException ex) when (chatId != 0 && messageId != 0 && IsStaleFile(ex))
         {
             var message = await GetMessageAsync(client, chatId, messageId, cancellationToken);
+            var kind = AttachmentKinds.Parse(type ?? "file", allowThumbnail: true);
             var refreshed = MessageFiles.GetAllFiles(message).FirstOrDefault(candidate =>
-                AttachmentKinds.Matches(type, candidate.Kind)
+                AttachmentKinds.Matches(kind, candidate.Kind)
                 && Matches(file.Id, file.Remote?.UniqueId, file.Remote?.Id, candidate.File));
             if (refreshed is null)
                 throw new InvalidOperationException($"Message {chatId}/{messageId} no longer contains file id {file.Id}.", ex);

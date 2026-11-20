@@ -249,6 +249,8 @@ internal static class MessageFiles
         TdApi.ThumbnailFormat.ThumbnailFormatWebp => "image/webp",
         TdApi.ThumbnailFormat.ThumbnailFormatGif => "image/gif",
         TdApi.ThumbnailFormat.ThumbnailFormatMpeg4 => "video/mp4",
+        TdApi.ThumbnailFormat.ThumbnailFormatWebm => "video/webm",
+        TdApi.ThumbnailFormat.ThumbnailFormatTgs => "application/x-tgsticker",
         _ => null
     };
 

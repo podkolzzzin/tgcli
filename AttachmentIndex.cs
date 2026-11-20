@@ -44,10 +44,11 @@ internal static class AttachmentIndex
             Directory.CreateDirectory(sessionDirectory);
             var path = Path.Combine(sessionDirectory, FileName);
             var info = new FileInfo(path);
-            var rowBytes = rows.Sum(row => Encoding.UTF8.GetByteCount(row) + 1L);
+            var rowBytes = 1 + rows.Sum(row => Encoding.UTF8.GetByteCount(row) + 1L);
             if ((info.Exists ? info.Length : 0) + rowBytes <= MaximumBytes)
             {
-                await File.AppendAllTextAsync(path, string.Join('\n', rows) + "\n");
+                // A leading newline isolates a torn tail from a previous process.
+                await File.AppendAllTextAsync(path, "\n" + string.Join('\n', rows) + "\n");
             }
             else
             {
@@ -64,7 +65,14 @@ internal static class AttachmentIndex
         }
     }
 
-    public static async Task<AttachmentIndexEntry?> ResolveAsync(string sessionDirectory, int fileId)
+    public static Task<AttachmentIndexEntry?> ResolveAsync(string sessionDirectory, int fileId) =>
+        FindAsync(sessionDirectory, entry => entry.file_id == fileId);
+
+    public static Task<AttachmentIndexEntry?> ResolveRemoteAsync(string sessionDirectory, string remoteId) =>
+        FindAsync(sessionDirectory, entry => entry.remote_id == remoteId);
+
+    private static async Task<AttachmentIndexEntry?> FindAsync(
+        string sessionDirectory, Func<AttachmentIndexEntry, bool> matches)
     {
         if (string.IsNullOrWhiteSpace(sessionDirectory))
         {
@@ -75,7 +83,7 @@ internal static class AttachmentIndex
         try
         {
             var entries = await ReadRecentAsync(Path.Combine(sessionDirectory, FileName));
-            return entries.LastOrDefault(entry => entry.file_id == fileId);
+            return entries.LastOrDefault(matches);
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
@@ -90,7 +98,7 @@ internal static class AttachmentIndex
     private static async Task CompactAsync(string path, IEnumerable<string> newRows)
     {
         var recent = (await ReadRecentAsync(path)).Concat(newRows.Select(Parse).OfType<AttachmentIndexEntry>());
-        var rows = recent.Reverse().DistinctBy(entry => entry.file_id).Select(Serialize);
+        var rows = recent.Reverse().DistinctBy(entry => (entry.file_id, entry.remote_id)).Select(Serialize);
         var kept = new Stack<string>();
         var remaining = MaximumBytes / 2;
         foreach (var row in rows)

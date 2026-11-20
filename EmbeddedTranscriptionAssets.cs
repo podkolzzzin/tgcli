@@ -42,14 +42,27 @@ internal sealed class EmbeddedTranscriptionAssets
     {
         if (File.Exists(destination))
         {
-            using var existing = File.OpenRead(destination);
-            if (Convert.ToHexString(SHA256.HashData(existing)).Equals(expectedHash, StringComparison.OrdinalIgnoreCase)) return;
+            try
+            {
+                // A verifier in another process can continue to read its opened file across atomic replacement.
+                using var existing = new FileStream(destination, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete);
+                if (Convert.ToHexString(SHA256.HashData(existing)).Equals(expectedHash, StringComparison.OrdinalIgnoreCase))
+                    return;
+            }
+            catch (FileNotFoundException)
+            {
+                // Another process removed the old cache entry between existence and open.
+            }
         }
         Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
         var temporary = destination + "." + Guid.NewGuid().ToString("N") + ".tmp";
         try
         {
-            using (var file = new FileStream(temporary, FileMode.CreateNew, FileAccess.Write, FileShare.None)) source.CopyTo(file);
+            using (var file = new FileStream(temporary, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+            {
+                source.CopyTo(file);
+                file.Flush(flushToDisk: true);
+            }
             using (var file = File.OpenRead(temporary))
                 if (!Convert.ToHexString(SHA256.HashData(file)).Equals(expectedHash, StringComparison.OrdinalIgnoreCase))
                     throw new InvalidOperationException("Embedded transcription asset failed checksum verification.");

@@ -5,6 +5,9 @@ namespace TgCli;
 
 internal sealed class WhisperMediaTranscriber : IMediaTranscriber
 {
+    private const int MaximumSegments = 32000;
+    private const int MaximumTranscriptCharacters = 1024 * 1024;
+    private static readonly object RuntimeGate = new();
     private WhisperFactory? factory;
 
     public async Task<MediaTranscript> TranscribeAsync(string path, string language, CancellationToken cancellationToken)
@@ -16,25 +19,48 @@ internal sealed class WhisperMediaTranscriber : IMediaTranscriber
         if (factory is null)
         {
             // Native loading needs the runtime directory tree even in a single-file .NET publish.
-            RuntimeOptions.LibraryPath = Path.Combine(assets.DirectoryPath, "tgcli");
-            RuntimeOptions.RuntimeLibraryOrder = [RuntimeLibrary.Cpu, RuntimeLibrary.CpuNoAvx];
-            factory = WhisperFactory.FromBuffer(assets.ReadModel());
+            lock (RuntimeGate)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                RuntimeOptions.LibraryPath = Path.Combine(assets.DirectoryPath, "tgcli");
+                RuntimeOptions.RuntimeLibraryOrder = [RuntimeLibrary.Cpu, RuntimeLibrary.CpuNoAvx];
+                factory = WhisperFactory.FromBuffer(assets.ReadModel());
+            }
         }
+        cancellationToken.ThrowIfCancellationRequested();
+        using var inference = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         await using var processor = factory.CreateBuilder()
             .WithLanguage(language)
-            .WithThreads(Math.Clamp(Environment.ProcessorCount, 1, 8))
+            .WithThreads(Math.Clamp(Environment.ProcessorCount, 1, 4))
             .WithNoContext()
             .Build();
         await using var wav = File.OpenRead(audio.Path);
         var segments = new List<TranscriptSegment>();
         var detectedLanguage = language;
-        await foreach (var segment in processor.ProcessAsync(wav, cancellationToken))
+        var textLength = 0;
+        try
         {
-            segments.Add(new(segment.Start.TotalSeconds, segment.End.TotalSeconds, segment.Text.Trim()));
-            if (!string.IsNullOrWhiteSpace(segment.Language)) detectedLanguage = segment.Language;
+            await foreach (var segment in processor.ProcessAsync(wav, inference.Token))
+            {
+                var text = segment.Text.Trim();
+                if (segments.Count == MaximumSegments || text.Length > MaximumTranscriptCharacters - textLength)
+                {
+                    inference.Cancel();
+                    throw new InvalidOperationException("Generated transcription exceeded the supported output size.");
+                }
+
+                segments.Add(new(segment.Start.TotalSeconds, segment.End.TotalSeconds, text));
+                textLength += text.Length;
+                if (!string.IsNullOrWhiteSpace(segment.Language)) detectedLanguage = segment.Language;
+            }
+            cancellationToken.ThrowIfCancellationRequested();
+            return new("whisper-base", detectedLanguage, segments);
         }
-        cancellationToken.ThrowIfCancellationRequested();
-        return new("whisper-base", detectedLanguage, segments);
+        finally
+        {
+            // The processor's DisposeAsync drains native inference before its factory or input is freed.
+            inference.Cancel();
+        }
     }
 
     public ValueTask DisposeAsync()

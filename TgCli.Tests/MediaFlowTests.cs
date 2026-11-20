@@ -194,6 +194,168 @@ public sealed class MediaFlowTests
         }
     }
 
+
+    [Fact]
+    public async Task RefreshFollowsTheSameThumbnailWhenItsFileIdChanges()
+    {
+        var directory = Directory.CreateTempSubdirectory("tgcli-media-refresh-");
+        try
+        {
+            var message = VideoMessage();
+            var thumbnail = ((TdApi.MessageContent.MessageVideo)message.Content).Video.Thumbnail;
+            var original = new TdApi.File { Id = 11, Remote = new() { Id = "stale", UniqueId = "same-media" } };
+            var source = Path.Combine(directory.FullName, "refreshed.jpg");
+            File.WriteAllText(source, "thumbnail");
+            thumbnail.File = new()
+            {
+                Id = 12,
+                Size = 9,
+                Remote = new() { Id = "fresh", UniqueId = "same-media" },
+                Local = new() { Path = source, IsDownloadingCompleted = true }
+            };
+            var client = new FakeTdClient(request => request switch
+            {
+                TdApi.DownloadFile download when download.FileId == 11 =>
+                    throw new TdException(new TdApi.Error { Code = 400, Message = "FILE_REFERENCE_EXPIRED" }),
+                TdApi.GetMessage get when get.ChatId == message.ChatId && get.MessageId == message.Id => message,
+                _ => throw new InvalidOperationException("Unexpected Telegram request.")
+            });
+
+            var result = await TgCommands.DownloadFileWithRefreshAsync(client, original, "file", message.ChatId, message.Id,
+                TestContext.Current.CancellationToken);
+            Assert.Equal(12, result.Id);
+            Assert.Equal("thumbnail", File.ReadAllText(result.Local.Path));
+        }
+        finally
+        {
+            directory.Delete(true);
+        }
+    }
+
+    [Fact]
+    public async Task DownloadRefreshRejectsAnEditedReplacementWithReusedId()
+    {
+        var message = VideoMessage();
+        var thumbnail = ((TdApi.MessageContent.MessageVideo)message.Content).Video.Thumbnail;
+        thumbnail.File.Remote = new() { Id = "new-remote", UniqueId = "new-media" };
+        var original = new TdApi.File { Id = 11, Remote = new() { Id = "stale", UniqueId = "old-media" } };
+        var client = new FakeTdClient(request => request switch
+        {
+            TdApi.DownloadFile download when download.FileId == 11 =>
+                throw new TdException(new TdApi.Error { Code = 400, Message = "FILE_REFERENCE_EXPIRED" }),
+            TdApi.GetMessage get when get.ChatId == message.ChatId && get.MessageId == message.Id => message,
+            _ => throw new InvalidOperationException("Unexpected Telegram request.")
+        });
+
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            TgCommands.DownloadFileWithRefreshAsync(client, original, "file", message.ChatId, message.Id,
+                TestContext.Current.CancellationToken));
+        Assert.Contains("no longer contains file id 11", error.Message);
+    }
+
+    [Fact]
+    public async Task CancelingBetweenCopyAndPromotionPreservesPreviousFile()
+    {
+        var directory = Directory.CreateTempSubdirectory("tgcli-media-stage-");
+        try
+        {
+            var source = Path.Combine(directory.FullName, "complete");
+            var destination = Path.Combine(directory.FullName, "existing");
+            File.WriteAllText(source, "replacement");
+            File.WriteAllText(destination, "previous output");
+            var file = new TdApi.File { Id = 11, Size = 11, Local = new() { Path = source, IsDownloadingCompleted = true } };
+            using var cancellation = CancellationTokenSource.CreateLinkedTokenSource(TestContext.Current.CancellationToken);
+            using (var stage = await AtomicDownload.StageAsync(file, destination, cancellation.Token))
+            {
+                Assert.Equal("previous output", File.ReadAllText(destination));
+                cancellation.Cancel();
+                Assert.ThrowsAny<OperationCanceledException>(() => stage.Promote(cancellation.Token));
+            }
+            Assert.Equal("previous output", File.ReadAllText(destination));
+            Assert.Equal(2, Directory.GetFiles(directory.FullName).Length);
+        }
+        finally
+        {
+            directory.Delete(true);
+        }
+    }
+
+    [Fact]
+    public async Task LegacyIndexIsCompactedAndNewestAttachmentRemainsResolvable()
+    {
+        var directory = Directory.CreateTempSubdirectory("tgcli-media-index-");
+        try
+        {
+            var path = Path.Combine(directory.FullName, "attachment-index.jsonl");
+            await File.WriteAllTextAsync(path, new string('x', AttachmentIndex.MaximumBytes + 10) + "\n",
+                TestContext.Current.CancellationToken);
+            var message = VideoMessage();
+
+            await AttachmentIndex.RecordAsync(directory.FullName, message.ChatId, message.Id, MessageFiles.GetAllFiles(message));
+
+            Assert.True(new FileInfo(path).Length <= AttachmentIndex.MaximumBytes);
+            var entry = await AttachmentIndex.ResolveAsync(directory.FullName, 11);
+            Assert.NotNull(entry);
+            Assert.Equal("thumbnail", entry.role);
+        }
+        finally
+        {
+            directory.Delete(true);
+        }
+    }
+
+
+    [Fact]
+    public async Task TornIndexTailDoesNotHideTheNextRecord()
+    {
+        var directory = Directory.CreateTempSubdirectory("tgcli-media-index-");
+        try
+        {
+            await File.WriteAllTextAsync(Path.Combine(directory.FullName, "attachment-index.jsonl"),
+                "{\"chat_id\": -1001, ", TestContext.Current.CancellationToken);
+            var message = VideoMessage();
+            var thumbnail = MessageFiles.GetAllFiles(message).Single(file => file.FileId == 11);
+            await AttachmentIndex.RecordAsync(directory.FullName, message.ChatId, message.Id, [thumbnail]);
+
+            var entry = await AttachmentIndex.ResolveAsync(directory.FullName, 11);
+            Assert.NotNull(entry);
+            Assert.Equal("thumbnail", entry.role);
+        }
+        finally
+        {
+            directory.Delete(true);
+        }
+    }
+
+
+    [Fact]
+    public async Task IndexedRemoteReferenceFollowsTheSameThumbnailAfterRefresh()
+    {
+        var directory = Directory.CreateTempSubdirectory("tgcli-media-index-");
+        try
+        {
+            var message = VideoMessage();
+            var thumbnail = ((TdApi.MessageContent.MessageVideo)message.Content).Video.Thumbnail;
+            thumbnail.File.Remote = new() { Id = "expired-remote", UniqueId = "same-thumbnail" };
+            await AttachmentIndex.RecordAsync(directory.FullName, message.ChatId, message.Id, MessageFiles.GetAllFiles(message));
+            thumbnail.File = new() { Id = 12, Remote = new() { Id = "current-remote", UniqueId = "same-thumbnail" } };
+            var client = new FakeTdClient(request => request switch
+            {
+                TdApi.GetMessage get when get.ChatId == message.ChatId && get.MessageId == message.Id => message,
+                _ => throw new InvalidOperationException("Unexpected Telegram request.")
+            });
+
+            var resolved = await TgCommands.ResolveDownloadFileAsync(client, directory.FullName, "thumbnail", "expired-remote",
+                0, 0, TestContext.Current.CancellationToken);
+            Assert.Equal(12, resolved.Id);
+            Assert.Equal("current-remote", resolved.Remote.Id);
+        }
+        finally
+        {
+            directory.Delete(true);
+        }
+    }
+
     private sealed class FakeTdClient(Func<TdApi.Object, TdApi.Object> reply) : TdApi.IClient
     {
         public event EventHandler<TdApi.Update>? UpdateReceived { add { } remove { } }

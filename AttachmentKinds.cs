@@ -19,7 +19,7 @@ internal enum AttachmentKind
 
 internal static class AttachmentKinds
 {
-    public static AttachmentKind Parse(string value)
+    public static AttachmentKind Parse(string value, bool allowThumbnail = false)
     {
         return Normalize(value) switch
         {
@@ -32,7 +32,7 @@ internal static class AttachmentKinds
             "animation" or "gif" => AttachmentKind.Animation,
             "video-note" or "videonote" or "round" => AttachmentKind.VideoNote,
             "file" => AttachmentKind.File,
-            "thumbnail" => AttachmentKind.Thumbnail,
+            "thumbnail" when allowThumbnail => AttachmentKind.Thumbnail,
             _ => throw new ValidationException($"Unsupported attachment type '{value}'.")
         };
     }
@@ -49,7 +49,6 @@ internal static class AttachmentKinds
             AttachmentKind.Animation => new TdApi.SearchMessagesFilter.SearchMessagesFilterAnimation(),
             AttachmentKind.VideoNote => new TdApi.SearchMessagesFilter.SearchMessagesFilterVideoNote(),
             AttachmentKind.All or AttachmentKind.File => new TdApi.SearchMessagesFilter.SearchMessagesFilterEmpty(),
-            AttachmentKind.Thumbnail => throw new ValidationException("Thumbnails can be selected by attachment identifier, but Telegram does not search for thumbnails."),
             _ => new TdApi.SearchMessagesFilter.SearchMessagesFilterEmpty()
         };
     }
@@ -60,11 +59,8 @@ internal static class AttachmentKinds
         _ => kind.ToString().ToLowerInvariant()
     };
 
-    public static bool Matches(string? requestedType, string kind)
-    {
-        var requested = Parse(requestedType ?? "file");
-        return requested is AttachmentKind.All or AttachmentKind.File || CanonicalName(requested) == kind;
-    }
+    public static bool Matches(AttachmentKind requested, string kind) =>
+        requested is AttachmentKind.All or AttachmentKind.File || CanonicalName(requested) == kind;
 
     public static TdApi.FileType ToFileType(AttachmentKind kind)
     {

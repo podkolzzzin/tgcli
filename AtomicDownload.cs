@@ -20,13 +20,14 @@ internal sealed class AtomicDownload(string temporaryPath, string destination, l
     public static string GetCompletedPath(TdApi.File file) => TryGetCompletedPath(file)
         ?? throw new IOException($"Telegram did not provide a complete local file for file_id={file.Id}.");
 
-    public static async Task<AtomicDownload> StageAsync(TdApi.File file, string destination, CancellationToken cancellationToken)
+    public static async Task<AtomicDownload> StageAsync(
+        TdApi.File file, string destination, CancellationToken cancellationToken, string temporaryNamePrefix = ".tgcli-download-")
     {
         cancellationToken.ThrowIfCancellationRequested();
         var sourcePath = GetCompletedPath(file);
         destination = Path.GetFullPath(destination);
         var directory = Directory.CreateDirectory(Path.GetDirectoryName(destination)!).FullName;
-        var temporaryPath = Path.Combine(directory, $".tgcli-download-{Guid.NewGuid():N}.tmp");
+        var temporaryPath = Path.Combine(directory, $"{temporaryNamePrefix}{Guid.NewGuid():N}.tmp");
         try
         {
             await using var source = new FileStream(sourcePath, FileMode.Open, FileAccess.Read, FileShare.Read, 65536, useAsync: true);
