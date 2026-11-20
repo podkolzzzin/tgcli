@@ -19,6 +19,7 @@ jobs:
         run: |
           @'
           import os
+          import re
           from pathlib import Path
           import subprocess
           import tempfile
@@ -32,6 +33,14 @@ jobs:
               print(f'{label}: exit={result.returncode} stdout={result.stdout!r} stderr={result.stderr!r}', flush=True)
               return result
 
+          def dacl(path, snapshot):
+              result = command('save DACL', str(icacls), str(path), '/save', str(snapshot))
+              assert result.returncode == 0
+              acl = snapshot.read_text(encoding='utf-16-le')
+              print(f'DACL {path.name}: {acl!r}', flush=True)
+              return acl
+
+          inherited_sid = r"\(A;(?:[A-Z]{2})*ID(?:[A-Z]{2})*;[^;]+;;;(?:AU|S-1-5-11)\)"
           with tempfile.TemporaryDirectory(prefix='tgcli-cli-e2e-') as temporary:
               home = Path(temporary) / 'isolated profile'
               installed = home / 'installed'
@@ -47,6 +56,7 @@ jobs:
               with tempfile.TemporaryDirectory(prefix='.tgcli-update-', dir=installed) as stage:
                   candidate = Path(stage) / 'tgcli-win-x64.exe'
                   candidate.write_bytes(b'verified synthetic candidate')
+                  assert not re.search(inherited_sid, dacl(candidate, home / 'private-acl.txt'))
                   fd, sibling = tempfile.mkstemp(prefix='.tgcli-install-', dir=installed)
                   with os.fdopen(fd, 'wb') as output:
                       output.write(candidate.read_bytes())
@@ -56,4 +66,5 @@ jobs:
               command('original query on replacement', *ps, old, env=env)
               command('SDDL', *ps, '(Get-Acl -LiteralPath $env:TGCLI_ACL_FILE -ErrorAction Stop).Sddl', env=env)
               command('icacls query on replacement', str(icacls), str(target))
+              assert re.search(inherited_sid, dacl(target, home / 'installed-acl.txt'))
           '@ | python -
