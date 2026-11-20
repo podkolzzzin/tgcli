@@ -22,75 +22,119 @@ internal sealed class HistoryFetchResult
     public Dictionary<long, long?> OldestReachableByChat { get; } = [];
     public List<JObject> Gaps { get; } = [];
     public bool Complete { get; set; } = true;
+    public bool Local { get; init; }
+    public bool LimitSatisfied { get; set; }
+    public long? NextMessageId { get; set; }
 }
 
 internal static class ChatHistory
 {
     private const int ChannelMessageIdShift = 20;
 
-    public static async Task<HistoryFetchResult> FetchAsync(TelegramSession tg, long chatId, bool all, bool local, int maxPages, bool followMigrations, CancellationToken cancellationToken = default)
+    public static async Task<HistoryFetchResult> FetchAsync(
+        TelegramSession tg, long chatId, bool all, bool local, int maxPages, bool followMigrations,
+        CancellationToken cancellationToken = default, long fromMessageId = 0, int offset = 0, int limit = 100,
+        Func<TdApi.Message, bool>? match = null, int requestTimeout = 60, bool retainNativeOperation = false)
     {
-        var chain = followMigrations ? await GetMigrationChainAsync(tg, chatId) : [chatId];
-        return await FetchPagesAsync(chain, all, local, maxPages,
-            (id, cursor) => tg.Client.GetChatHistoryAsync(id, cursor, offset: 0, limit: 100, onlyLocal: local),
-            id => IsChannelAsync(tg, id), cancellationToken);
+        ReadBounds.ValidatePage(fromMessageId, offset, limit, maxPages);
+        ForumTopicHistory.ValidateRequestTimeout(requestTimeout);
+        return await TelegramOperations.WithReadDeadlineAsync(requestTimeout, cancellationToken, retainNativeOperation, async token =>
+        {
+            // Local-only reads avoid remote migration enrichment.
+            var chain = followMigrations && !local ? await GetMigrationChainAsync(tg, chatId, token, retainNativeOperation) : [chatId];
+            return await FetchPagesAsync(chain, all, local, maxPages,
+                request => tg.Client.ExecuteAsync(request), id => tg.Client.GetChatAsync(id),
+                token, fromMessageId, offset, limit, match, retainNativeOperation);
+        });
     }
 
-    internal static async Task<HistoryFetchResult> FetchPagesAsync(IReadOnlyList<long> chain, bool all, bool local, int maxPages,
-        Func<long, long, Task<TdApi.Messages>> fetchPage, Func<long, Task<bool>> isChannelChat,
-        CancellationToken cancellationToken = default)
+    internal static async Task<HistoryFetchResult> FetchPagesAsync(
+        IReadOnlyList<long> chain, bool all, bool local, int maxPages,
+        Func<TdApi.GetChatHistory, Task<TdApi.Messages>> fetchPage, Func<long, Task<TdApi.Chat>> getChat,
+        CancellationToken cancellationToken = default, long fromMessageId = 0, int offset = 0, int limit = 100,
+        Func<TdApi.Message, bool>? match = null, bool retainNativeOperation = false)
     {
-        var result = new HistoryFetchResult();
+        ReadBounds.ValidatePage(fromMessageId, offset, limit, maxPages);
+        if (chain.Count > 1 && (fromMessageId != 0 || offset != 0))
+            throw new ArgumentException("A history start cursor applies to a single chat.");
+
+        var result = new HistoryFetchResult { Local = local, LimitSatisfied = !all };
         var seen = new HashSet<(long ChatId, long MessageId)>();
 
         foreach (var sourceChatId in chain)
         {
             cancellationToken.ThrowIfCancellationRequested();
             result.SourceChats.Add(sourceChatId);
-            var isChannel = await isChannelChat(sourceChatId);
-            if (isChannel) result.ChannelChats.Add(sourceChatId);
-            var cursor = 0L;
-            var exhausted = false;
-            var pageLimit = all ? Math.Max(1, maxPages) : 1;
-            for (var page = 0; page < pageLimit; page++)
+            var chat = await TelegramOperations.AwaitReadAsync(getChat(sourceChatId), cancellationToken, retainNativeOperation);
+            if (chat.Type is TdApi.ChatType.ChatTypeSupergroup { IsChannel: true })
+                result.ChannelChats.Add(sourceChatId);
+
+            var cursor = fromMessageId;
+            var matches = 0;
+            var oldest = (long?)null;
+            var reason = "max_pages_reached";
+            var acceptedEmptyRetry = false;
+            for (var page = 0; page < maxPages; page++)
             {
                 cancellationToken.ThrowIfCancellationRequested();
+                var request = new TdApi.GetChatHistory
+                {
+                    ChatId = sourceChatId,
+                    FromMessageId = cursor,
+                    Offset = page == 0 ? offset : 0,
+                    Limit = all ? 100 : Math.Min(100, limit - matches + (cursor != 0 ? 1 : 0)),
+                    OnlyLocal = local
+                };
                 TdApi.Messages history;
                 var attempt = 0;
                 while (true)
                 {
                     try
                     {
-                        history = await fetchPage(sourceChatId, cursor);
+                        history = await TelegramOperations.AwaitReadAsync(fetchPage(request), cancellationToken, retainNativeOperation);
                         break;
                     }
-                    catch (Exception ex) when (ex is not OperationCanceledException && attempt++ < 2)
+                    catch (TdException ex) when (ex.Error.Code >= 500 && attempt++ < 2)
                     {
                         result.Retries++;
-                        result.Warnings.Add($"Retry {attempt}/2 for chat {sourceChatId} cursor {cursor}: {ex.Message}");
                         await Task.Delay(TimeSpan.FromMilliseconds(250 * attempt), cancellationToken);
                     }
                 }
+
                 result.PagesFetched++;
                 result.PagesByChat[sourceChatId] = result.PagesByChat.GetValueOrDefault(sourceChatId) + 1;
-                if (history.Messages_.Length == 0)
+                var raw = history.Messages_ ?? [];
+                if (!local && fromMessageId == 0 && offset == 0 && oldest is null
+                    && chat.LastMessage?.Id is long knownLatest && (raw.Length == 0 || raw.Max(x => x.Id) < knownLatest))
                 {
-                    if (isChannel && TryMoveToPreviousChannelAnchor(ref cursor))
+                    reason = "newest_message_unavailable";
+                    // Compare with the latest message known after TDLib synchronization. This is not a server snapshot.
+                    if (!acceptedEmptyRetry && page + 1 < maxPages)
                     {
-                        if (StopAtMaxPages(result, sourceChatId, maxPages, page, pageLimit))
-                        {
-                            break;
-                        }
-
+                        acceptedEmptyRetry = true;
+                        result.Retries++;
                         continue;
                     }
-
-                    exhausted = true;
                     break;
                 }
 
-                var newMessages = 0;
-                foreach (var message in history.Messages_)
+                if (raw.Length == 0)
+                {
+                    reason = local ? "local_cache_exhausted" : "history_exhausted";
+                    result.NextMessageId = null;
+                    break;
+                }
+
+                var rows = OlderHistoryRows(raw, cursor, continuation: cursor != 0 && (page != 0 || offset == 0));
+                result.Duplicates += raw.Length - rows.Length;
+                if (rows.Length == 0)
+                {
+                    reason = "cursor_not_advanced";
+                    result.NextMessageId = null;
+                    break;
+                }
+
+                foreach (var message in rows)
                 {
                     if (!seen.Add((message.ChatId, message.Id)))
                     {
@@ -98,151 +142,101 @@ internal static class ChatHistory
                         continue;
                     }
 
-                    result.Messages.Add(new ExportedMessage(message, sourceChatId, message.ChatId, message.Id));
-                    newMessages++;
-                }
-
-                var oldestMessageId = history.Messages_.Min(x => x.Id);
-                var previousCursor = cursor;
-                cursor = oldestMessageId;
-                if (newMessages == 0 && isChannel && TryMoveToPreviousChannelAnchor(ref cursor))
-                {
-                    if (StopAtMaxPages(result, sourceChatId, maxPages, page, pageLimit))
+                    oldest = message.Id;
+                    if (match is null || match(message))
                     {
-                        break;
+                        result.Messages.Add(new ExportedMessage(message, sourceChatId, message.ChatId, message.Id));
+                        matches++;
                     }
-
-                    continue;
+                    if (!all && matches >= limit)
+                        break;
                 }
 
-                if (!all)
+                // The next request must use an actual TDLib ID, even when every row was filtered out.
+                if (oldest is not long next || (cursor != 0 && next >= cursor && request.Offset == 0))
                 {
-                    result.Complete = false;
-                    result.TerminationReason = "page_limit";
+                    reason = "cursor_not_advanced";
+                    result.NextMessageId = null;
                     break;
                 }
+                cursor = next;
+                result.NextMessageId = cursor;
 
-                // TDLib may return just one cached message even when more history exists.
-                // A short page is not EOF: continue until an empty page or a safety bound.
-                if (previousCursor != 0 && cursor >= previousCursor)
+                if (!all && matches >= limit)
                 {
-                    result.Complete = false;
-                    result.TerminationReason = "cursor_not_advanced";
-                    result.Warnings.Add($"History cursor did not advance for chat {sourceChatId}; completeness is unknown.");
-                    break;
-                }
-
-                if (StopAtMaxPages(result, sourceChatId, maxPages, page, pageLimit))
-                {
+                    reason = "page_limit";
                     break;
                 }
             }
 
-            result.OldestReachableByChat[sourceChatId] = result.Messages
-                .Where(x => x.SourceChatId == sourceChatId)
-                .Select(x => (long?)x.Message.Id)
-                .Min();
-            if (all && !exhausted && result.Complete)
+            result.OldestReachableByChat[sourceChatId] = oldest;
+            result.LimitSatisfied &= matches >= limit;
+            if (reason != "history_exhausted")
             {
                 result.Complete = false;
-                result.TerminationReason = local ? "local_database_limit" : "client_limit";
+                result.TerminationReason = reason;
+                if (reason is "max_pages_reached" or "cursor_not_advanced" or "newest_message_unavailable")
+                    result.Warnings.Add($"Chat {sourceChatId} history ended with {reason} after {result.PagesByChat[sourceChatId]} pages.");
             }
         }
 
+        if (chain.Count != 1) result.NextMessageId = null;
         result.Messages.Sort((a, b) =>
         {
             var byDate = a.Message.Date.CompareTo(b.Message.Date);
-            return byDate != 0 ? byDate : a.Message.Id.CompareTo(b.Message.Id);
+            if (byDate != 0) return byDate;
+            var byChat = a.SourceChatId.CompareTo(b.SourceChatId);
+            return byChat != 0 ? byChat : a.Message.Id.CompareTo(b.Message.Id);
         });
         return result;
     }
 
-    private static bool StopAtMaxPages(HistoryFetchResult result, long sourceChatId, int maxPages, int page, int pageLimit)
-    {
-        if (page != pageLimit - 1)
-        {
-            return false;
-        }
-
-        result.Complete = false;
-        result.TerminationReason = "max_pages_reached";
-        result.Warnings.Add($"Stopped at --max-pages={maxPages} for chat {sourceChatId}; history may be incomplete.");
-        return true;
-    }
+    internal static TdApi.Message[] OlderHistoryRows(TdApi.Message[] rows, long anchor, bool continuation) =>
+        rows.Where(message => !continuation || message.Id < anchor)
+            .DistinctBy(message => (message.ChatId, message.Id))
+            .OrderByDescending(message => message.Id)
+            .ToArray();
 
     public static long GetShortMessageId(long messageId) => messageId >> ChannelMessageIdShift;
 
-    public static long ToChannelMessageId(long shortMessageId) => shortMessageId << ChannelMessageIdShift;
-
-    private static bool TryMoveToPreviousChannelAnchor(ref long cursor)
+    internal static long? TryGetPublicPostId(long messageId)
     {
-        var shortMessageId = GetShortMessageId(cursor);
-        if (shortMessageId <= 1)
-        {
-            return false;
-        }
-
-        cursor = ToChannelMessageId(shortMessageId - 1);
-        return true;
+        var postId = GetShortMessageId(messageId);
+        return postId is > 0 and <= int.MaxValue && (postId << ChannelMessageIdShift) == messageId ? postId : null;
     }
 
-    private static async Task<bool> IsChannelAsync(TelegramSession tg, long chatId)
+    public static long ToChannelMessageId(long shortMessageId)
     {
-        try
-        {
-            var chat = await tg.Client.GetChatAsync(chatId);
-            return chat.Type is TdApi.ChatType.ChatTypeSupergroup { IsChannel: true };
-        }
-        catch
-        {
-            return false;
-        }
+        if (shortMessageId is < 1 or > int.MaxValue)
+            throw new ArgumentOutOfRangeException(nameof(shortMessageId), "A public post ID must be between 1 and 2147483647.");
+        return shortMessageId << ChannelMessageIdShift;
     }
 
-    public static async Task<IReadOnlyList<long>> GetMigrationChainAsync(TelegramSession tg, long chatId)
+    public static Task<IReadOnlyList<long>> GetMigrationChainAsync(
+        TelegramSession tg, long chatId, CancellationToken cancellationToken = default, bool retainNativeOperation = false) =>
+        GetMigrationChainAsync(tg.Client, chatId, cancellationToken, retainNativeOperation);
+
+    internal static async Task<IReadOnlyList<long>> GetMigrationChainAsync(TdApi.IClient client,
+        long chatId, CancellationToken cancellationToken, bool retainNativeOperation = false)
     {
-        // First walk forward when the caller supplied the legacy basic-group chat.
-        var initial = await tg.Client.GetChatAsync(chatId);
-        if (GetLongProperty(initial.Type, "BasicGroupId") is long initialBasicGroupId)
+        cancellationToken.ThrowIfCancellationRequested();
+        var chat = await TelegramOperations.AwaitReadAsync(client.GetChatAsync(chatId), cancellationToken, retainNativeOperation);
+        var initialBasic = chat.Type as TdApi.ChatType.ChatTypeBasicGroup;
+        if (initialBasic is not null)
         {
-            var basicInfo = await tg.Client.GetBasicGroupFullInfoAsync(initialBasicGroupId);
-            if (GetLongProperty(basicInfo, "UpgradedToSupergroupId") is long upgradedTo and not 0)
-            {
-                var upgraded = await tg.Client.CreateSupergroupChatAsync(upgradedTo, force: false);
-                chatId = upgraded.Id;
-            }
+            var group = await TelegramOperations.AwaitReadAsync(client.GetBasicGroupAsync(initialBasic.BasicGroupId), cancellationToken, retainNativeOperation);
+            if (group.UpgradedToSupergroupId == 0) return [chat.Id];
+            var successor = await TelegramOperations.AwaitReadAsync(client.CreateSupergroupChatAsync(group.UpgradedToSupergroupId, force: false), cancellationToken, retainNativeOperation);
+            return [chat.Id, successor.Id];
         }
 
-        // Then walk backward from the newest supergroup, producing oldest -> newest.
-        var ordered = new List<long>();
-        var seen = new HashSet<long>();
-        var current = chatId;
+        if (chat.Type is not TdApi.ChatType.ChatTypeSupergroup { IsChannel: false } supergroup)
+            return [chat.Id];
 
-        while (seen.Add(current))
-        {
-            var chat = await tg.Client.GetChatAsync(current);
-            ordered.Add(current);
-
-            var type = chat.Type;
-            var supergroupId = GetLongProperty(type, "SupergroupId");
-            if (supergroupId is null)
-            {
-                break;
-            }
-
-            var fullInfo = await tg.Client.GetSupergroupFullInfoAsync(supergroupId.Value);
-            var upgradedFromBasicGroupId = GetLongProperty(fullInfo, "UpgradedFromBasicGroupId");
-            if (upgradedFromBasicGroupId is null or 0)
-            {
-                break;
-            }
-
-            var legacyChat = await tg.Client.CreateBasicGroupChatAsync(upgradedFromBasicGroupId.Value, force: false);
-            current = legacyChat.Id;
-        }
-
-        ordered.Reverse();
-        return ordered;
+        var info = await TelegramOperations.AwaitReadAsync(client.GetSupergroupFullInfoAsync(supergroup.SupergroupId), cancellationToken, retainNativeOperation);
+        if (info.UpgradedFromBasicGroupId == 0) return [chat.Id];
+        var predecessor = await TelegramOperations.AwaitReadAsync(client.CreateBasicGroupChatAsync(info.UpgradedFromBasicGroupId, force: false), cancellationToken, retainNativeOperation);
+        return [predecessor.Id, chat.Id];
     }
 
     public static JObject BuildManifest(HistoryFetchResult history)
@@ -278,6 +272,8 @@ internal static class ChatHistory
             },
             ["termination_reason"] = history.TerminationReason,
             ["warnings"] = new JArray(history.Warnings),
+            ["source"] = history.Local ? "cache" : "telegram",
+            ["freshness"] = history.Local ? "cache" : "tdlib_update_state",
             ["complete"] = history.Complete
         };
 

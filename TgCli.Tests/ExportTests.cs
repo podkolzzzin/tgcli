@@ -102,7 +102,8 @@ public sealed class ExportTests
                         Type = new TdApi.ReactionType.ReactionTypeEmoji { Emoji = "\ud83d\udc4d" },
                         TotalCount = 5,
                         IsChosen = true
-                    }
+                    },
+                    new TdApi.MessageReaction { Type = new TdApi.ReactionType.ReactionTypePaid(), TotalCount = 7 }
                 ],
                 PaidReactors = [new TdApi.PaidReactor { StarCount = 2 }]
             }
@@ -112,7 +113,7 @@ public sealed class ExportTests
         Assert.Equal(7, metrics.Value<int>("forward_count"));
         Assert.Equal(3, metrics.Value<int>("reply_count"));
         Assert.True(metrics.Value<bool>("has_comments"));
-        Assert.Equal(2, metrics.Value<long>("paid_reaction_count"));
+        Assert.Equal(7, metrics.Value<long>("paid_reaction_count"));
         Assert.Equal("emoji", metrics["reaction_counts"]![0]!.Value<string>("type"));
         Assert.Equal("\ud83d\udc4d", metrics["reaction_counts"]![0]!.Value<string>("emoji"));
         Assert.Equal(5, metrics["reaction_counts"]![0]!.Value<int>("count"));
@@ -235,7 +236,8 @@ public sealed class ExportTests
                     .Reverse()
                     .Select(id => new TdApi.Message { Id = id })
                     .ToArray()
-            }
+            },
+            new TdApi.Messages { Messages_ = [] }
         ]);
 
         var result = await ForumTopicHistory.FetchAsync(
@@ -254,8 +256,8 @@ public sealed class ExportTests
             CancellationToken.None);
 
         Assert.True(result.Complete);
-        Assert.Equal("short_page", result.TerminationReason);
-        Assert.Equal(2, result.PagesFetched);
+        Assert.Equal("history_exhausted", result.TerminationReason);
+        Assert.Equal(3, result.PagesFetched);
         Assert.Equal(150, result.Messages.Count);
         Assert.Equal(101, requests[1].FromMessageId);
         Assert.All(requests, request => Assert.Equal(10, request.ForumTopicId));

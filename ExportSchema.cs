@@ -59,6 +59,7 @@ internal static class ExportSchema
             ["reply_target"] = replyPreview,
             ["forward_origin"] = ToToken(message.ForwardInfo),
             ["interaction_info"] = ToToken(message.InteractionInfo),
+            ["interaction_info_available"] = metrics["interaction_info_available"],
             ["view_count"] = metrics["view_count"],
             ["forward_count"] = metrics["forward_count"],
             ["reply_count"] = metrics["reply_count"],
@@ -66,7 +67,7 @@ internal static class ExportSchema
             ["paid_reaction_count"] = metrics["paid_reaction_count"],
             ["has_comments"] = metrics["has_comments"],
             ["poll"] = message.Content is TdApi.MessageContent.MessagePoll poll ? ToToken(poll.Poll) : JValue.CreateNull(),
-            ["service_event"] = IsService(message.Content) ? ToToken(message.Content) : JValue.CreateNull(),
+            ["service_event"] = ChatCommands.IsServiceMessage(message.Content) ? ToToken(message.Content) : JValue.CreateNull(),
             ["attachments"] = files,
             ["is_deleted"] = false,
             ["tombstone"] = JValue.CreateNull(),
@@ -92,22 +93,26 @@ internal static class ExportSchema
 
     internal static JObject ToMetricsJson(TdApi.MessageInteractionInfo? interactionInfo)
     {
-        var replyCount = interactionInfo?.ReplyInfo?.ReplyCount ?? 0;
+        var replies = interactionInfo?.ReplyInfo;
+        var reactions = interactionInfo?.Reactions?.Reactions ?? [];
         return new JObject
         {
-            ["view_count"] = interactionInfo?.ViewCount ?? 0,
-            ["forward_count"] = interactionInfo?.ForwardCount ?? 0,
-            ["reply_count"] = replyCount,
-            ["reaction_counts"] = BuildReactionCounts(interactionInfo?.Reactions),
-            ["paid_reaction_count"] = interactionInfo?.Reactions?.PaidReactors?.Sum(x => x.StarCount) ?? 0,
-            ["has_comments"] = replyCount > 0
+            ["interaction_info_available"] = interactionInfo is not null,
+            ["view_count"] = interactionInfo?.ViewCount,
+            ["forward_count"] = interactionInfo?.ForwardCount,
+            ["reply_count"] = interactionInfo is null ? (long?)null : replies?.ReplyCount ?? 0,
+            ["reaction_count"] = interactionInfo is null ? (long?)null : reactions.Sum(x => (long)x.TotalCount),
+            ["reaction_counts"] = interactionInfo is null ? JValue.CreateNull() : BuildReactionCounts(reactions),
+            ["paid_reaction_count"] = interactionInfo is null ? (long?)null
+                : reactions.Where(x => x.Type is TdApi.ReactionType.ReactionTypePaid).Sum(x => (long)x.TotalCount),
+            ["has_comments"] = interactionInfo is null ? (bool?)null : replies is not null
         };
     }
 
-    private static JArray BuildReactionCounts(TdApi.MessageReactions? reactions)
+    internal static JArray BuildReactionCounts(IEnumerable<TdApi.MessageReaction> reactions)
     {
         var rows = new JArray();
-        foreach (var reaction in reactions?.Reactions ?? [])
+        foreach (var reaction in reactions)
         {
             var (type, emoji, customEmojiId) = FormatReactionType(reaction.Type);
             rows.Add(new JObject
@@ -115,7 +120,7 @@ internal static class ExportSchema
                 ["type"] = type,
                 ["emoji"] = emoji is null ? JValue.CreateNull() : emoji,
                 ["custom_emoji_id"] = customEmojiId is null ? JValue.CreateNull() : customEmojiId,
-                ["count"] = reaction.TotalCount,
+                ["count"] = (long)reaction.TotalCount,
                 ["chosen"] = reaction.IsChosen
             });
         }
@@ -269,11 +274,6 @@ internal static class ExportSchema
             ?? content?.GetType().GetProperty("Caption")?.GetValue(content);
         return ToToken(formattedText?.GetType().GetProperty("Entities")?.GetValue(formattedText));
     }
-
-    private static bool IsService(TdApi.MessageContent? content) =>
-        content is not null && content is not TdApi.MessageContent.MessageText
-        && MessageFiles.GetAllFiles(new TdApi.Message { Content = content }).Count == 0
-        && !content.GetType().Name.Contains("Poll", StringComparison.Ordinal);
 
     private static JToken ToToken(object? value) =>
         value is null ? JValue.CreateNull() : JToken.FromObject(value, JsonSerializer.CreateDefault());

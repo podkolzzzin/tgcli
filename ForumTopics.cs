@@ -10,6 +10,8 @@ internal sealed class ForumTopicHistoryResult
     public List<TdApi.Message> Messages { get; } = [];
     public int PagesFetched { get; set; }
     public bool Complete { get; set; }
+    public bool LimitSatisfied { get; set; }
+    public long? NextMessageId { get; set; }
     public string TerminationReason { get; set; } = "not_started";
 }
 
@@ -27,35 +29,15 @@ internal static class ForumTopicHistory
         bool all,
         int maxPages,
         int requestTimeout,
-        CancellationToken cancellationToken, bool retainNativeOperation = false)
+        CancellationToken cancellationToken, bool retainNativeOperation = false, Func<TdApi.Message, bool>? match = null)
     {
         ValidateTopicId(topicId);
         ValidateRequestTimeout(requestTimeout);
 
-        return FetchAsync(
-            chatId,
-            topicId,
-            fromMessageId,
-            offset,
-            limit,
-            all,
-            maxPages,
-            async (request, token) =>
-            {
-                try
-                {
-                    if (retainNativeOperation) return await tg.Client.ExecuteAsync(request);
-                    return await tg.Client.ExecuteAsync(request)
-                        .WaitAsync(TimeSpan.FromSeconds(requestTimeout), token);
-                }
-                catch (TimeoutException ex)
-                {
-                    throw new TimeoutException(
-                        $"Telegram timed out after {requestTimeout} seconds while reading forum topic {topicId}.",
-                        ex);
-                }
-            },
-            cancellationToken);
+        return TelegramOperations.WithReadDeadlineAsync(requestTimeout, cancellationToken, retainNativeOperation, token =>
+            FetchAsync(chatId, topicId, fromMessageId, offset, limit, all, maxPages,
+                async (request, ct) => await TelegramOperations.AwaitReadAsync(tg.Client.ExecuteAsync(request), ct, retainNativeOperation),
+                token, match));
     }
 
     internal static async Task<ForumTopicHistoryResult> FetchAsync(
@@ -67,16 +49,14 @@ internal static class ForumTopicHistory
         bool all,
         int maxPages,
         Func<TdApi.GetForumTopicHistory, CancellationToken, Task<TdApi.Messages>> fetchPage,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken, Func<TdApi.Message, bool>? match = null)
     {
         ValidateTopicId(topicId);
-        var result = new ForumTopicHistoryResult();
-        var seen = new HashSet<long>();
+        ReadBounds.ValidatePage(fromMessageId, offset, limit, maxPages);
+        var result = new ForumTopicHistoryResult { TerminationReason = "max_pages_reached" };
         var cursor = fromMessageId;
-        var pageLimit = all ? PageSize : Math.Clamp(limit, 1, PageSize);
-        var pageBudget = all ? Math.Max(1, maxPages) : 1;
 
-        for (var page = 0; page < pageBudget; page++)
+        for (var page = 0; page < maxPages; page++)
         {
             cancellationToken.ThrowIfCancellationRequested();
             var response = await fetchPage(new TdApi.GetForumTopicHistory
@@ -85,43 +65,42 @@ internal static class ForumTopicHistory
                 ForumTopicId = topicId,
                 FromMessageId = cursor,
                 Offset = page == 0 ? offset : 0,
-                Limit = pageLimit
+                Limit = all ? PageSize : Math.Min(PageSize, limit - result.Messages.Count + (cursor != 0 ? 1 : 0))
             }, cancellationToken);
+            cancellationToken.ThrowIfCancellationRequested();
             result.PagesFetched++;
 
-            var pageMessages = response.Messages_
-                .Where(message => seen.Add(message.Id))
-                .ToArray();
-            if (pageMessages.Length == 0)
-            {
-                result.Complete = response.Messages_.Length == 0;
-                result.TerminationReason = result.Complete ? "history_exhausted" : "cursor_stalled";
-                break;
-            }
-
-            result.Messages.AddRange(pageMessages);
-            var nextCursor = pageMessages.Min(message => message.Id);
-            if (cursor != 0 && nextCursor >= cursor)
-            {
-                result.Complete = false;
-                result.TerminationReason = "cursor_stalled";
-                break;
-            }
-
-            cursor = nextCursor;
-            if (!all || response.Messages_.Length < pageLimit)
+            var raw = response.Messages_ ?? [];
+            if (raw.Length == 0)
             {
                 result.Complete = true;
-                result.TerminationReason = response.Messages_.Length < pageLimit
-                    ? "short_page"
-                    : "page_complete";
+                result.TerminationReason = "history_exhausted";
+                result.NextMessageId = null;
                 break;
             }
-        }
 
-        if (!result.Complete && result.TerminationReason == "not_started")
-        {
-            result.TerminationReason = "max_pages_reached";
+            var rows = ChatHistory.OlderHistoryRows(raw, cursor, cursor != 0 && (page != 0 || offset == 0));
+            if (rows.Length == 0)
+            {
+                result.TerminationReason = "cursor_stalled";
+                result.NextMessageId = null;
+                break;
+            }
+
+            foreach (var message in rows)
+            {
+                cursor = message.Id;
+                if (match is null || match(message)) result.Messages.Add(message);
+                if (!all && result.Messages.Count >= limit)
+                {
+                    result.LimitSatisfied = true;
+                    result.TerminationReason = "page_limit";
+                    break;
+                }
+            }
+
+            result.NextMessageId = cursor;
+            if (result.LimitSatisfied) break;
         }
 
         return result;
@@ -137,9 +116,9 @@ internal static class ForumTopicHistory
 
     public static void ValidateRequestTimeout(int requestTimeout)
     {
-        if (requestTimeout <= 0)
+        if (requestTimeout <= 0 || requestTimeout > (uint.MaxValue - 1L) / 1000)
         {
-            throw new ValidationException("Request timeout must be greater than zero.");
+            throw new ValidationException("Request timeout is outside the supported range.");
         }
     }
 }
@@ -232,66 +211,17 @@ public sealed class ForumCommands
         string? session = null,
         CancellationToken cancellationToken = default)
     {
+        var parsedFormat = format.Trim().ToLowerInvariant();
+        if (parsedFormat is not ("json" or "jsonl" or "tsv" or "plain"))
+            throw new ArgumentException("Format must be one of: json, jsonl, tsv, plain.", nameof(format));
+        ReadBounds.ValidatePage(0, 0, limit, maxPages);
         ForumTopicHistory.ValidateRequestTimeout(requestTimeout);
+        cancellationToken.ThrowIfCancellationRequested();
         await using var tg = await TelegramSession.CreateReadyAsync(session, lockTimeout, noWait);
-        var topics = new List<TdApi.ForumTopic>();
-        var seen = new HashSet<int>();
-        var offsetDate = 0;
-        long offsetMessageId = 0;
-        var offsetTopicId = 0;
-        var pageSize = Math.Clamp(limit, 1, 100);
-        var pageBudget = all ? Math.Max(1, maxPages) : 1;
+        var result = await TelegramOperations.WithReadDeadlineAsync(requestTimeout, cancellationToken, false, token =>
+            FetchTopicsAsync(chatId, query, limit, all, maxPages, request => tg.Client.ExecuteAsync(request).WaitAsync(token), token));
 
-        for (var page = 0; page < pageBudget; page++)
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-            TdApi.ForumTopics response;
-            try
-            {
-                response = await tg.Client.ExecuteAsync(new TdApi.GetForumTopics
-                {
-                    ChatId = chatId,
-                    Query = query,
-                    OffsetDate = offsetDate,
-                    OffsetMessageId = offsetMessageId,
-                    OffsetForumTopicId = offsetTopicId,
-                    Limit = pageSize
-                }).WaitAsync(TimeSpan.FromSeconds(requestTimeout), cancellationToken);
-            }
-            catch (TimeoutException ex)
-            {
-                throw new TimeoutException(
-                    $"Telegram timed out after {requestTimeout} seconds while listing forum topics.",
-                    ex);
-            }
-
-            var pageTopics = response.Topics
-                .Where(topic => topic.Info is not null && seen.Add(topic.Info.ForumTopicId))
-                .ToArray();
-            topics.AddRange(pageTopics);
-            if (pageTopics.Length == 0 && response.Topics.Length > 0)
-            {
-                throw new InvalidOperationException("Forum topic pagination cursor did not advance.");
-            }
-
-            if (!all || response.Topics.Length < pageSize || pageTopics.Length == 0)
-            {
-                break;
-            }
-
-            if (response.NextOffsetDate == offsetDate
-                && response.NextOffsetMessageId == offsetMessageId
-                && response.NextOffsetForumTopicId == offsetTopicId)
-            {
-                throw new InvalidOperationException("Forum topic pagination cursor did not advance.");
-            }
-
-            offsetDate = response.NextOffsetDate;
-            offsetMessageId = response.NextOffsetMessageId;
-            offsetTopicId = response.NextOffsetForumTopicId;
-        }
-
-        var rows = topics.Select(topic => new JObject
+        var rows = result.Topics.Select(topic => new JObject
         {
             ["chat_id"] = topic.Info.ChatId,
             ["topic_id"] = topic.Info.ForumTopicId,
@@ -304,10 +234,25 @@ public sealed class ForumCommands
             ["last_message_id"] = topic.LastMessage?.Id ?? 0
         }).ToArray();
 
-        switch (format.Trim().ToLowerInvariant())
+        if (parsedFormat != "json" && !result.Complete)
+            Console.Error.WriteLine($"Forum topic coverage: {result.TerminationReason} after {result.PagesFetched} pages.");
+
+        switch (parsedFormat)
         {
             case "json":
-                Console.WriteLine(new JArray(rows).ToString(Formatting.None));
+                Console.WriteLine(new JObject
+                {
+                    ["items"] = new JArray(rows),
+                    ["complete"] = result.Complete,
+                    ["termination_reason"] = result.TerminationReason,
+                    ["pages_fetched"] = result.PagesFetched,
+                    ["next_offset"] = result.Next is { } next ? new JObject
+                    {
+                        ["date"] = next.Date,
+                        ["message_id"] = next.Message,
+                        ["topic_id"] = next.Topic
+                    } : null
+                }.ToString(Formatting.None));
                 break;
             case "jsonl":
                 foreach (var row in rows)
@@ -341,8 +286,47 @@ public sealed class ForumCommands
         }
     }
 
+    internal static async Task<ForumTopicsResult> FetchTopicsAsync(
+        long chatId, string query, int limit, bool all, int maxPages,
+        Func<TdApi.GetForumTopics, Task<TdApi.ForumTopics>> fetch, CancellationToken cancellationToken)
+    {
+        ReadBounds.ValidatePage(0, 0, limit, maxPages);
+        var topics = new List<TdApi.ForumTopic>();
+        var seenTopics = new HashSet<int>();
+        (int Date, long Message, int Topic) offset = default;
+        var seenOffsets = new HashSet<(int Date, long Message, int Topic)> { offset };
+        var budget = all ? maxPages : 1;
+
+        for (var page = 1; page <= budget; page++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var response = await fetch(new TdApi.GetForumTopics
+            {
+                ChatId = chatId,
+                Query = query,
+                OffsetDate = offset.Date,
+                OffsetMessageId = offset.Message,
+                OffsetForumTopicId = offset.Topic,
+                Limit = limit
+            });
+            cancellationToken.ThrowIfCancellationRequested();
+            topics.AddRange((response.Topics ?? []).Where(topic => topic.Info is not null && seenTopics.Add(topic.Info.ForumTopicId)));
+            offset = (response.NextOffsetDate, response.NextOffsetMessageId, response.NextOffsetForumTopicId);
+            if (offset == default)
+                return new(topics, null, true, "topics_exhausted", page);
+            if (!seenOffsets.Add(offset))
+                return new(topics, null, false, "cursor_not_advanced", page);
+        }
+
+        return new(topics, offset, false, all ? "max_pages_reached" : "page_limit", budget);
+    }
+
     private static string Clean(string? value)
     {
         return (value ?? string.Empty).Replace('\t', ' ').Replace('\r', ' ').Replace('\n', ' ');
     }
 }
+
+
+internal sealed record ForumTopicsResult(List<TdApi.ForumTopic> Topics,
+    (int Date, long Message, int Topic)? Next, bool Complete, string TerminationReason, int PagesFetched);
