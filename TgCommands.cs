@@ -1007,19 +1007,29 @@ public sealed class ChatCommands
     }
 
     /// <summary>
-    /// Export chat history to Markdown, JSONL, or TSV; add --transcribe for embedded speech-to-text.
+    /// Export chat history with coverage and snapshot metadata.
     /// </summary>
     /// <param name="chatId">Chat id from tgcli chat list/search/resolve.</param>
     /// <param name="output">Destination file, or - for stdout.</param>
-    /// <param name="format">Output format: md, jsonl, tsv.</param>
-    /// <param name="all">Fetch all pages until history ends or max-pages is reached.</param>
-    /// <param name="maxPages">Maximum pages to fetch with --all.</param>
-    /// <param name="local">Read local database only.</param>
+    /// <param name="format">Output format (md, jsonl, json, tsv, or plain).</param>
+    /// <param name="all">Fetch the entire history, including migration segments.</param>
+    /// <param name="allHistory">Request the entire history, including migration segments.</param>
+    /// <param name="maxPages">Maximum history pages to fetch per source chat.</param>
+    /// <param name="local">Read a fresh view of the local cache with unverified server coverage.</param>
     /// <param name="includeLinks">Include tg:// and https links for each exported message.</param>
+    /// <param name="resume">Upsert a matching JSONL snapshot and retain messages absent from this scan.</param>
+    /// <param name="incremental">Refresh a matching JSONL snapshot, including verified missing messages.</param>
+    /// <param name="sinceMessageId">Export higher message IDs in the requested chat. Migration segments have separate IDs.</param>
+    /// <param name="sinceDate">Include messages dated at or after this timestamp.</param>
+    /// <param name="resumeToken">Use the per-chat checkpoint from a matching JSONL manifest.</param>
+    /// <param name="fields">Project a comma-separated set of JSON or JSONL fields.</param>
     /// <param name="session">Session directory. Defaults to ~/.local/share/tgcli.</param>
     /// <param name="transcribe">Transcribe voice notes, video notes, audio and video with the embedded model.</param>
     /// <param name="transcribeLanguage">Speech language code, or auto.</param>
     /// <param name="transcribeCommand">Optional external transcription executable, mutually exclusive with --transcribe.</param>
+    /// <param name="expectSince">Require at least one fetched message at or before this timestamp.</param>
+    /// <param name="expectCountMin">Require at least this many fetched messages in scope.</param>
+    /// <param name="failIncomplete">Require verified coverage, which full online exports already enforce.</param>
     public async Task Export(
         long chatId,
         string output = "-",
@@ -1044,99 +1054,39 @@ public sealed class ChatCommands
         string? session = null,
         CancellationToken cancellationToken = default)
     {
+        var request = ExportRequest.Create(chatId, output, format, all || allHistory, local, maxPages, includeLinks,
+            resume, incremental, sinceMessageId, sinceDate, resumeToken, fields, transcribe, transcribeLanguage,
+            transcribeCommand, expectSince, expectCountMin, failIncomplete);
+        cancellationToken.ThrowIfCancellationRequested();
         await using var transcription = TranscriptionCommands.Create(transcribe, transcribeLanguage, transcribeCommand);
+        using var store = request.Path is null ? null : ExportSnapshotStore.Open(request.Path);
+        var previous = request.UpdatesSnapshot ? store!.ReadCache(request, cancellationToken) : null;
+
         await using var tg = await TelegramSession.CreateReadyAsync(session, local: local);
-        var chat = await tg.Client.GetChatAsync(chatId).WaitAsync(cancellationToken);
-        all = all || allHistory;
-        var history = await ChatHistory.FetchAsync(tg, chatId, all, local, maxPages, followMigrations: all, cancellationToken: cancellationToken);
-        var sinceTimestamp = string.IsNullOrWhiteSpace(sinceDate)
-            ? (DateTimeOffset?)null
-            : DateTimeOffset.Parse(sinceDate, CultureInfo.InvariantCulture);
-        if (!string.IsNullOrWhiteSpace(resumeToken))
+        var history = await ChatHistory.FetchAsync(tg, chatId, request.All, local, maxPages,
+            followMigrations: request.All, cancellationToken: cancellationToken);
+        var snapshot = ExportSnapshot.Build(request, history, previous);
+        var title = request.Format == OutputFormat.Md
+            ? (await tg.Client.GetChatAsync(chatId).WaitAsync(cancellationToken)).Title
+            : null;
+
+        Task WriteAsync(TextWriter writer) => request.HasRowIdentity
+            ? snapshot.WriteAsync(writer, row => Output.BuildExportedRowAsync(tg, row, includeLinks,
+                request.Fields, transcription, cancellationToken), cancellationToken)
+            : Output.WriteExportedMessagesAsync(writer, tg, snapshot.Messages, request.Format, title,
+                includeLinks, request.Fields, transcription, cancellationToken);
+
+        if (store is null)
         {
-            var tokenParts = resumeToken.Split(':', 2);
-            if (tokenParts.Length != 2 || !long.TryParse(tokenParts[1], out sinceMessageId))
-            {
-                throw new ArgumentException("Resume token must have the form <chat-id>:<message-id>.", nameof(resumeToken));
-            }
+            await WriteAsync(Console.Out);
+            await Console.Out.FlushAsync(cancellationToken);
+            Console.Error.WriteLine(snapshot.Manifest.ToString(Formatting.None));
         }
-        history.Messages.RemoveAll(item =>
-            (sinceMessageId != 0 && item.Message.Id <= sinceMessageId)
-            || (sinceTimestamp is not null && DateTimeOffset.FromUnixTimeSeconds(item.Message.Date) < sinceTimestamp));
-        var fetchedKeys = history.Messages.Select(x => (ChatId: x.Message.ChatId, MessageId: x.Message.Id)).ToHashSet();
-        var manifest = ChatHistory.BuildManifest(history);
-        manifest["schema"] = ExportSchema.Name;
-        manifest["schema_version"] = ExportSchema.Version;
-        ChatHistory.ValidateManifest(manifest,
-            string.IsNullOrWhiteSpace(expectSince) ? null : DateTimeOffset.Parse(expectSince, CultureInfo.InvariantCulture),
-            expectCountMin,
-            failIncomplete);
-        Console.Error.WriteLine(manifest.ToString(Formatting.None));
-
-        var parsedFormat = Output.ParseFormat(format);
-        if (output == "-")
+        else
         {
-            await Output.WriteExportedMessagesAsync(Console.Out, tg, history.Messages, parsedFormat, chat.Title, includeLinks, fields, transcription, cancellationToken);
-            return;
+            var manifest = await store.CommitAsync(snapshot.Manifest, WriteAsync, cancellationToken);
+            Console.Error.WriteLine(manifest.ToString(Formatting.None));
         }
-
-        var fullPath = Path.GetFullPath(output);
-        Directory.CreateDirectory(Path.GetDirectoryName(fullPath)!);
-        var cachedKeys = new HashSet<(long ChatId, long MessageId)>();
-        string? cachedResumeToken = null;
-        if ((resume || incremental) && File.Exists(fullPath))
-        {
-            ValidateJsonlCache(fullPath, parsedFormat);
-            if (parsedFormat is not OutputFormat.Jsonl)
-            {
-                throw new ArgumentException("--resume and --incremental require --format jsonl.");
-            }
-            foreach (var line in File.ReadLines(fullPath).Where(x => !string.IsNullOrWhiteSpace(x)))
-            {
-                var row = JObject.Parse(line);
-                var key = (row.Value<long>("chat_id"), row.Value<long>("message_id"));
-                cachedKeys.Add(key);
-                if (row.Value<bool?>("is_deleted") != true)
-                {
-                    cachedResumeToken = $"{key.Item1}:{key.Item2}";
-                }
-            }
-        }
-
-        history.Messages.RemoveAll(x => cachedKeys.Contains((x.Message.ChatId, x.Message.Id)));
-        var deletedKeys = incremental && history.Complete && sinceMessageId == 0 && sinceTimestamp is null
-            ? cachedKeys.Except(fetchedKeys).ToArray()
-            : [];
-        var targetPath = fullPath + ".tmp";
-        await using (var stream = new StreamWriter(new FileStream(targetPath, FileMode.Create, FileAccess.Write, FileShare.None)))
-        {
-            if ((resume || incremental) && File.Exists(fullPath))
-            {
-                foreach (var line in File.ReadLines(fullPath)) await stream.WriteLineAsync(line);
-            }
-            await Output.WriteExportedMessagesAsync(stream, tg, history.Messages, parsedFormat, resume || incremental ? null : chat.Title, includeLinks, fields, transcription, cancellationToken);
-            foreach (var key in deletedKeys)
-            {
-                await stream.WriteLineAsync(ExportSchema.Tombstone(key.ChatId, key.MessageId).ToString(Formatting.None));
-            }
-        }
-
-        File.Move(targetPath, fullPath, overwrite: true);
-
-        manifest["existing_message_count"] = cachedKeys.Count;
-        manifest["new_message_count"] = history.Messages.Count;
-        manifest["tombstone_count"] = deletedKeys.Length;
-        manifest["output_record_count"] = cachedKeys.Count + history.Messages.Count + deletedKeys.Length;
-        var last = history.Messages.LastOrDefault();
-        manifest["resume_token"] = last is null
-            ? cachedResumeToken is null
-                ? (resumeToken is null ? JValue.CreateNull() : resumeToken)
-                : cachedResumeToken
-            : $"{last.Message.ChatId}:{last.Message.Id}";
-        var manifestPath = fullPath + ".manifest.json";
-        var manifestTemp = manifestPath + ".tmp";
-        File.WriteAllText(manifestTemp, manifest.ToString(Formatting.Indented));
-        File.Move(manifestTemp, manifestPath, overwrite: true);
     }
 
     /// <summary>
@@ -1315,20 +1265,6 @@ public sealed class ChatCommands
             "chatupgradeto" => "chat-upgrade-to",
             var normalized => normalized
         };
-    }
-
-    private static void ValidateJsonlCache(string path, OutputFormat format)
-    {
-        if (format is not OutputFormat.Jsonl)
-        {
-            return;
-        }
-
-        foreach (var line in File.ReadLines(path))
-        {
-            if (string.IsNullOrWhiteSpace(line)) continue;
-            _ = JToken.Parse(line);
-        }
     }
 
     internal static async Task<JToken> TryGetParticipantCountAsync(TelegramSession tg, long chatId)

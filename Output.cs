@@ -136,27 +136,33 @@ internal static class Output
     {
         if (format is OutputFormat.Jsonl or OutputFormat.Json)
         {
-            var objects = new List<JObject>();
-            foreach (var item in messages.OrderBy(x => x.Message.Date).ThenBy(x => x.Message.Id))
+            var array = format == OutputFormat.Json;
+            if (array) writer.Write('[');
+            var first = true;
+            foreach (var item in messages.OrderBy(x => x.Message.Date).ThenBy(x => x.Message.ChatId).ThenBy(x => x.Message.Id))
             {
-                objects.Add(SelectFields(
-                    await ExportSchema.BuildMessageAsync(tg, item, includeLinks, transcription, cancellationToken),
-                    fields));
+                var value = (await BuildExportedRowAsync(tg, item, includeLinks, fields, transcription, cancellationToken))
+                    .ToString(Newtonsoft.Json.Formatting.None);
+                if (array)
+                {
+                    if (!first) writer.Write(',');
+                    await writer.WriteAsync(value.AsMemory(), cancellationToken);
+                    first = false;
+                }
+                else
+                {
+                    await writer.WriteLineAsync(value.AsMemory(), cancellationToken);
+                }
             }
-
-            if (format is OutputFormat.Jsonl)
-            {
-                foreach (var value in objects) writer.WriteLine(value.ToString(Newtonsoft.Json.Formatting.None));
-            }
-            else
-            {
-                writer.WriteLine(new JArray(objects).ToString(Newtonsoft.Json.Formatting.None));
-            }
+            if (array) writer.WriteLine(']');
             return;
         }
 
         var rows = new List<MessageRow>();
-        foreach (var item in messages.OrderBy(x => x.Message.Id))
+        var ordered = format == OutputFormat.Md
+            ? messages.OrderBy(x => x.Message.Date).ThenBy(x => x.Message.ChatId).ThenBy(x => x.Message.Id)
+            : messages.OrderBy(x => x.Message.Id);
+        foreach (var item in ordered)
         {
             cancellationToken.ThrowIfCancellationRequested();
             var row = await BuildMessageRowAsync(tg, item.Message, null, includeLinks);
@@ -172,6 +178,14 @@ internal static class Output
         }
 
         WriteRows(writer, rows, format, title, includeLinks);
+    }
+
+    internal static async Task<JObject> BuildExportedRowAsync(
+        TelegramSession tg, ExportedMessage item, bool includeLinks, string? fields, MediaTranscription? transcription,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        return SelectFields(await ExportSchema.BuildMessageAsync(tg, item, includeLinks, transcription, cancellationToken), fields);
     }
 
     private static JObject SelectFields(JObject value, string? fields)
