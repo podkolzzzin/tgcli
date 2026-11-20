@@ -26,6 +26,7 @@ internal static class SessionDiagnostic
             {
                 await using var session = await TelegramSession.CreateAsync(root, apiId: 0, apiHash: null,
                     saveConfig: false, lockTimeout, noWait, cancellationToken: token);
+                await ObserveStartupAsync(session, token);
                 return await InspectAsync(session, token, initialLock);
             }, timeout ?? TimeSpan.FromSeconds(60), cancellationToken, "Session diagnostics");
         }
@@ -35,6 +36,17 @@ internal static class SessionDiagnostic
         }
         result.Data["latency_ms"] = timer.Elapsed.TotalMilliseconds;
         return result;
+    }
+
+    private static async Task ObserveStartupAsync(TelegramSession session, CancellationToken cancellationToken)
+    {
+        if (session.IsLoginRequired || session.IsAuthorized && session.IsConnected) return;
+        using var grace = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        grace.CancelAfter(TimeSpan.FromMilliseconds(650));
+        try { await session.EnsureConnectedAsync(grace.Token); }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested) { }
+        catch (TelegramAuthorizationException) { }
+        catch (TimeoutException) { }
     }
 
     internal static Task<SessionDiagnosticResult> InspectAsync(TelegramSession session, CancellationToken cancellationToken) =>
@@ -50,7 +62,7 @@ internal static class SessionDiagnostic
         {
             cancellationToken.ThrowIfCancellationRequested();
             session.CheckActive();
-            if (!session.IsAuthorized && session.AuthorizationState != "Unknown") throw LoginRequired();
+            if (session.IsLoginRequired) throw LoginRequired();
             if (session.IsAuthorized)
             {
                 try
@@ -81,15 +93,18 @@ internal static class SessionDiagnostic
 
         cancellationToken.ThrowIfCancellationRequested();
         data["latency_ms"] = timer.Elapsed.TotalMilliseconds;
+        var authorized = session.IsAuthorized;
+        var connection = session.ConnectionState;
+        var connected = connection == "ConnectionStateReady";
         data["authorization_state"] = session.AuthorizationState;
-        data["authorized"] = session.AuthorizationState == "Unknown" ? null : session.IsAuthorized;
-        data["connection_state"] = session.ConnectionState;
-        data["network_available"] = session.ConnectionState == "Unknown" ? null : session.IsConnected;
+        data["authorized"] = authorized || session.IsLoginRequired || failure is TelegramAuthorizationException ? authorized : null;
+        data["connection_state"] = connection;
+        data["network_available"] = connection == "Unknown" ? null : connected;
         if (failure is not null) return Unhealthy(data, failure);
-        if (!session.IsAuthorized)
+        if (!authorized)
             return Unhealthy(data, new IOException("TDLib authorization state is not yet known."), "authorization_unknown");
-        if (!session.IsConnected)
-            return Unhealthy(data, new IOException($"Telegram is not synchronized (state: {session.ConnectionState})."), "connection_unavailable");
+        if (!connected)
+            return Unhealthy(data, new IOException($"Telegram is not synchronized (state: {connection})."), "connection_unavailable");
         data["healthy"] = true;
         return new(data, true, null);
     }

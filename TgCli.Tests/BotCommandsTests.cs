@@ -88,7 +88,10 @@ public sealed class BotCommandsTests
     {
         using var fixture = new Fixture();
         await fixture.Commands.List(format: "json");
-        var bot = Assert.Single(JArray.Parse(fixture.Output.ToString()));
+        var bot = Assert.Single(fixture.Result["items"]);
+        Assert.True(fixture.Result.Value<bool>("complete"));
+        Assert.Equal("telegram", fixture.Result.Value<string>("source"));
+        Assert.Equal(JTokenType.String, bot["user_id"].Type);
         Assert.Equal("example_bot", bot.Value<string>("username"));
         Assert.True(bot.Value<bool>("is_bot"));
     }

@@ -153,7 +153,7 @@ public sealed class ExportSnapshotTests
 
         var visibility = ExportHistoryVisibility.ClassifySupergroup(
             new TdApi.Supergroup { Status = new TdApi.ChatMemberStatus.ChatMemberStatusAdministrator() }, allHistoryAvailable);
-        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+        await Assert.ThrowsAsync<PartialResultException>(() =>
             Export(work.Output, Request(incremental: true), narrower, visibility: visibility));
 
         Assert.Equal(originalData, File.ReadAllBytes(work.Output));
@@ -263,8 +263,8 @@ public sealed class ExportSnapshotTests
         var partial = History([10, -20]);
         partial.Complete = false;
         partial.TerminationReason = "max_pages_reached";
-        await Assert.ThrowsAsync<InvalidOperationException>(() => Export(work.Output, Request(incremental: true), partial));
-        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+        await Assert.ThrowsAsync<PartialResultException>(() => Export(work.Output, Request(incremental: true), partial));
+        await Assert.ThrowsAsync<PartialResultException>(() =>
             Export(work.Output, Request(incremental: true, expectSince: "1970-01-01T00:01:40Z"), History([10, -20])));
 
         Assert.Equal(originalData, File.ReadAllBytes(work.Output));
@@ -400,7 +400,7 @@ public sealed class ExportSnapshotTests
         Assert.False(snapshot.Manifest.Value<bool>("complete"));
         Assert.Equal("local_cache", snapshot.Manifest.Value<string>("source"));
         Assert.Null(snapshot.Manifest.Value<string>("resume_token"));
-        Assert.Throws<InvalidOperationException>(() => ExportSnapshot.Build(request, History([10]), null));
+        Assert.Throws<PartialResultException>(() => ExportSnapshot.Build(request, History([10]), null));
     }
 
     [Fact]
@@ -411,7 +411,7 @@ public sealed class ExportSnapshotTests
         history.Complete = false;
         history.TerminationReason = "max_pages_reached";
 
-        Assert.Throws<InvalidOperationException>(() => ExportSnapshot.Build(request, history, null));
+        Assert.Throws<PartialResultException>(() => ExportSnapshot.Build(request, history, null));
     }
 
     [Fact]
@@ -421,7 +421,7 @@ public sealed class ExportSnapshotTests
         var history = History([10, -20], Message(10, 1, 100, "cached"));
         history.PagesByChat.Remove(-20);
 
-        Assert.Throws<InvalidOperationException>(() => ExportSnapshot.Build(request, history, null));
+        Assert.Throws<PartialResultException>(() => ExportSnapshot.Build(request, history, null));
     }
 
     [Fact]

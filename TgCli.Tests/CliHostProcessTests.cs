@@ -66,7 +66,7 @@ public sealed class CliHostProcessTests : IDisposable
     {
         Directory.CreateDirectory(Session);
         using var lease = SessionLock.Acquire(Session);
-        using var process = Start(["diagnostics", "--lock-timeout", "30", "--request-timeout", "1"]);
+        using var process = Start(["chat", "messages", "--chat-id", "123", "--lock-timeout", "30", "--request-timeout", "1"]);
         var result = await FinishAsync(process);
 
         Assert.Equal(5, result.Code);
@@ -82,7 +82,7 @@ public sealed class CliHostProcessTests : IDisposable
 
         Directory.CreateDirectory(Session);
         using var lease = SessionLock.Acquire(Session);
-        using var process = Start(["diagnostics", "--lock-timeout", "30"]);
+        using var process = Start(["chat", "messages", "--chat-id", "123", "--lock-timeout", "30"]);
         await Task.Delay(600, TestContext.Current.CancellationToken);
         using var signal = Process.Start("kill", $"-INT {process.Id}")!;
         await signal.WaitForExitAsync(TestContext.Current.CancellationToken);

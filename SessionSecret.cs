@@ -14,7 +14,11 @@ public sealed class SessionCommands
     /// <param name="session">Session directory. Defaults to ~/.local/share/tgcli.</param>
     public void Export(string? session = null)
     {
-        Console.WriteLine(SessionSecret.Export(session));
+        var cancellationToken = CliExecution.CancellationToken;
+        cancellationToken.ThrowIfCancellationRequested();
+        var secret = SessionSecret.Export(session);
+        cancellationToken.ThrowIfCancellationRequested();
+        Console.WriteLine(secret);
     }
 
     /// <summary>
@@ -26,6 +30,7 @@ public sealed class SessionCommands
     {
         using var reader = new StreamReader(Console.OpenStandardInput());
         var secret = SessionSecret.ReadInput(reader);
+        CliExecution.CancellationToken.ThrowIfCancellationRequested();
         SessionSecret.Import(secret, session, force);
     }
 
@@ -34,28 +39,30 @@ public sealed class SessionCommands
     /// </summary>
     public void Status(string format = "json", string? session = null)
     {
+        var mode = Output.ParseFormat(format);
+        if (mode == OutputFormat.Md) throw new ArgumentException("Format must be one of: json, jsonl, tsv, plain.", nameof(format));
         var status = SessionLock.Inspect(session);
-        switch (format.Trim().ToLowerInvariant())
+        CliExecution.CancellationToken.ThrowIfCancellationRequested();
+        switch (mode)
         {
-            case "json":
-            case "jsonl":
+            case OutputFormat.Json or OutputFormat.Jsonl:
                 Console.WriteLine(JsonSerializer.Serialize(status));
                 break;
-            case "plain":
+            case OutputFormat.Plain:
                 Console.WriteLine(status.locked
                     ? $"locked owner={status.owner ?? "unknown"}"
                     : status.owner_metadata_stale
                         ? $"unlocked stale-owner={status.owner}"
                         : "unlocked");
                 break;
-            case "tsv":
+            case OutputFormat.Tsv:
                 Console.WriteLine("session_directory\tlocked\towner\towner_metadata_stale\tlock_path");
                 Console.WriteLine(string.Join('\t',
-                    status.session_directory,
+                    Output.Clean(status.session_directory),
                     status.locked,
-                    status.owner ?? string.Empty,
+                    Output.Clean(status.owner),
                     status.owner_metadata_stale,
-                    status.lock_path));
+                    Output.Clean(status.lock_path)));
                 break;
             default:
                 throw new ArgumentException("Format must be one of: json, jsonl, tsv, plain.", nameof(format));
@@ -72,6 +79,7 @@ public sealed class SessionCommands
             throw new ValidationException("Pass --stale-only to confirm safe stale-lock repair.");
         }
 
+        CliExecution.CancellationToken.ThrowIfCancellationRequested();
         Console.WriteLine(JsonSerializer.Serialize(SessionLock.RepairStale(session)));
     }
 }

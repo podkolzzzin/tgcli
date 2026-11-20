@@ -68,9 +68,9 @@ internal sealed class ExportSnapshot
             history.Gaps.Count == 0 && history.InaccessibleMessages == 0 &&
             sources.All(source => history.PagesByChat.GetValueOrDefault(source) > 0);
         var terminationReason = !history.Complete || complete ? history.TerminationReason :
-            request.Local ? "local_cache_exhausted" : !request.All ? "single_page" : "coverage_unverified";
+            request.Local ? "local_cache_exhausted" : !request.All ? history.TerminationReason : "coverage_unverified";
         if (request.RequireComplete && !complete)
-            throw new InvalidOperationException(
+            throw new PartialResultException(
                 $"Export integrity check found incomplete history ({terminationReason}).");
 
         var oldestBySource = new Dictionary<long, long>();
@@ -85,14 +85,14 @@ internal sealed class ExportSnapshot
         var messages = history.Messages.Where(request.Includes)
             .DistinctBy(item => new ExportRowKey(item.Message.ChatId, item.Message.Id)).ToArray();
         if (request.Local && messages.Length == 0)
-            throw new InvalidOperationException("The local cache has no messages in the requested export scope.");
+            throw new PartialResultException("The local cache has no messages in the requested export scope.");
         var first = messages.Where(item => item.Message.Date > 0).MinBy(item => item.Message.Date);
         if (request.ExpectSince is not null && (first is null ||
             DateTimeOffset.FromUnixTimeSeconds(first.Message.Date) > request.ExpectSince))
-            throw new InvalidOperationException(
+            throw new PartialResultException(
                 $"No fetched date reaches --expect-since={request.ExpectSince:O}.");
         if (messages.Length < request.ExpectCountMin)
-            throw new InvalidOperationException(
+            throw new PartialResultException(
                 $"The fetched message count is below --expect-count-min={request.ExpectCountMin}.");
 
         var manifest = ChatHistory.BuildManifest(history, messages);
@@ -102,6 +102,9 @@ internal sealed class ExportSnapshot
         manifest["source_chats"] = new JArray(sources.Order().Select(ExportRequest.FormatId));
         manifest["source"] = request.Local ? "local_cache" : "server_history";
         manifest["complete"] = complete;
+        manifest["history_exhausted"] = !request.Local && history.Complete;
+        manifest["limit_satisfied"] = !request.All && history.LimitSatisfied;
+        manifest["continuation"] = request.All ? JValue.CreateNull() : Wire.NullableId(history.NextMessageId);
         manifest["snapshot_kind"] = request.Checkpoint is not null && previous is null
             ? "delta" : complete ? "snapshot" : "partial";
         manifest["termination_reason"] = terminationReason;
@@ -132,7 +135,7 @@ internal sealed class ExportSnapshot
                 if (current.ContainsKey(key)) continue;
                 var missing = exactAuthoritativeRefresh && !cached.IsDeleted;
                 if (missing && !CoversPriorKey(key))
-                    throw new InvalidOperationException(
+                    throw new PartialResultException(
                         $"Cannot verify history visibility for missing records in chat {key.ChatId}. The prior snapshot was preserved.");
                 merged.Add(missing
                     ? new SnapshotRow(key, 0, true)

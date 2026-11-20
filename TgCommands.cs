@@ -36,7 +36,7 @@ public sealed class TgCommands
         var cancellationToken = CliExecution.CancellationToken;
         var remaining = CliExecution.Remaining;
         TimeSpan? probeBudget = remaining == Timeout.InfiniteTimeSpan ? null :
-            TimeSpan.FromMilliseconds(Math.Max(0, remaining.TotalMilliseconds - 150));
+            TimeSpan.FromMilliseconds(Math.Max(0, remaining.TotalMilliseconds - Math.Min(650, remaining.TotalMilliseconds / 2)));
         var result = await SessionDiagnostic.ProbeAsync(session, lockTimeout, noWait, cancellationToken, probeBudget);
         cancellationToken.ThrowIfCancellationRequested();
         Console.WriteLine(result.Data.ToString(Formatting.None));
@@ -247,6 +247,7 @@ public sealed class LinkCommands
         var links = local ? Wire.LocalLink(chatId, messageId) : await FetchLinksAsync();
         var result = Wire.Link(links);
         result["source"] = local ? Wire.LocalCache : Wire.Telegram;
+        result["link_verified"] = links.HttpsUrl is not null;
         cancellationToken.ThrowIfCancellationRequested();
         switch (mode)
         {
@@ -336,6 +337,8 @@ public sealed class MessageCommands
         {
             await Output.WriteExportedMessagesAsync(Console.Out, tg, [item], mode,
                 includeLinks: true, local: local, cancellationToken: cancellationToken);
+            if (local) Output.WriteSummary(new JObject { ["source"] = Wire.LocalCache,
+                ["chat_id"] = Wire.Id(chatId), ["message_id"] = Wire.Id(messageId) }, cancellationToken);
         }
     }
 }
@@ -766,11 +769,14 @@ public sealed class ChatCommands
         var mode = Output.ParseFormat(format);
         ReadBounds.ValidatePage(0, 0, limit, 1);
         await using var tg = await TelegramSession.CreateReadyAsync(session, cancellationToken: cancellationToken);
-        var chats = await TelegramOperations.ListChatsAsync(tg, limit, cancellationToken, retainNativeOperation: true);
-        var complete = chats.ChatIds.Length < limit;
-        var coverage = Wire.Coverage(Wire.Telegram, complete, complete ? "chat_list_exhausted" : "page_limit",
-            new { limit, chat_scope = "main" }, rowsFetched: chats.ChatIds.Length);
-        await Output.PrintChatsAsync(tg, chats.ChatIds, mode, coverage, cancellationToken);
+        var page = await TelegramOperations.ListChatDetailsAsync(tg, limit, cancellationToken, retainNativeOperation: true);
+        var chatIds = page.Chats.ChatIds ?? [];
+        var coverage = Wire.Coverage(Wire.Telegram, page.Complete, page.TerminationReason,
+            new { limit, chat_scope = "main" }, pagesFetched: page.PagesFetched, rowsFetched: chatIds.Length);
+        coverage["limit_satisfied"] = page.LimitSatisfied;
+        await Output.PrintChatsAsync(tg, chatIds, mode, coverage, cancellationToken);
+        if (!page.Complete && !page.LimitSatisfied)
+            throw new PartialResultException("Chat discovery is incomplete. See the acquisition coverage.");
     }
 
     /// <summary>
@@ -959,8 +965,7 @@ public sealed class ChatCommands
             var rows = result.Messages.Select(message => (Output.ToExportedMessage(message), (string?)searchQuery));
             if (parsedFormat == OutputFormat.Json)
             {
-                using var writer = new StringWriter(CultureInfo.InvariantCulture);
-                await Output.WriteMessageGroupsAsync(writer, tg, rows, parsedFormat, coverage: report,
+                await Output.WriteMessageGroupsAsync(TextWriter.Null, tg, rows, parsedFormat, coverage: report,
                     cancellationToken: cancellationToken);
             }
             else groups.AddRange(rows);
@@ -1056,7 +1061,17 @@ public sealed class ChatCommands
         var visibility = history.Complete && request.Incremental && previous is not null
             ? await ExportHistoryVisibility.ReadAsync(tg, previous.Sources, cancellationToken)
             : null;
-        var snapshot = ExportSnapshot.Build(request, history, previous, visibility);
+        ExportSnapshot snapshot;
+        try { snapshot = ExportSnapshot.Build(request, history, previous, visibility); }
+        catch (PartialResultException error)
+        {
+            var rejected = Wire.Coverage(local ? Wire.LocalCache : Wire.Telegram, false, "snapshot_not_verified",
+                request.Scope, null, history.PagesFetched, history.Messages.Count);
+            rejected["history_termination_reason"] = history.TerminationReason;
+            rejected["reason"] = error.Message;
+            Output.WriteSummary(rejected, cancellationToken);
+            throw;
+        }
         var title = request.Format == OutputFormat.Md
             ? local ? $"Chat {Wire.Id(chatId)}" : (await TelegramOperations.AwaitReadAsync(tg.Client.GetChatAsync(chatId),
                 cancellationToken, retainNativeOperation: true)).Title
@@ -1082,17 +1097,21 @@ public sealed class ChatCommands
             var manifest = await store.CommitAsync(snapshot.Manifest, WriteAsync, cancellationToken);
             Output.WriteSummary(manifest, cancellationToken);
         }
+        if (local && history.TerminationReason is not ("local_cache_exhausted" or "page_limit") ||
+            !request.All && PageIncomplete(false, history.Complete, history.LimitSatisfied, history.TerminationReason))
+            throw new PartialResultException("Export acquisition is incomplete. See the coverage summary.");
     }
 
     /// <summary>
     /// Return messages around a target and optionally follow its reply chain.
     /// </summary>
+    /// <param name="noReplyChain">Read the surrounding window without following reply ancestors.</param>
     public async Task Context(
         long chatId,
         long messageId,
         int before = 5,
         int after = 5,
-        bool followReplyChain = true,
+        bool noReplyChain = false,
         string format = "jsonl",
         string? session = null,
         int requestTimeout = 60,
@@ -1103,6 +1122,7 @@ public sealed class ChatCommands
         ForumTopicHistory.ValidateRequestTimeout(requestTimeout);
         cancellationToken.ThrowIfCancellationRequested();
         await using var tg = await TelegramSession.CreateReadyAsync(session, cancellationToken: cancellationToken);
+        var followReplyChain = !noReplyChain;
         var result = await TelegramOperations.ContextDetailsAsync(tg, chatId, messageId, before, after, followReplyChain,
             cancellationToken, retainNativeOperation: true);
         var coverage = Wire.Coverage(Wire.Telegram, result.WindowComplete,
@@ -1111,7 +1131,7 @@ public sealed class ChatCommands
             rowsFetched: result.Messages.Count);
         coverage["context"] = Wire.ContextCoverage(result);
         await Output.WriteReadMessagesAsync(tg, result.Messages, parsedFormat, coverage, cancellationToken);
-        if (!result.WindowComplete || result.UnavailableAncestor is not null)
+        if (!result.WindowComplete || result.ReplyChainStatus is not ("complete" or "disabled"))
             throw new PartialResultException("Context is incomplete. See the window and reply-chain coverage.");
     }
 
@@ -1151,6 +1171,7 @@ public sealed class ChatCommands
             "tsv" => $"chat_id\tcount\tcount_kind\tfirst_timestamp\tlast_timestamp\tparticipant_count\tattachments\n{payload["chat_id"]}\t{payload["count"]}\t{payload["count_kind"]}\t{payload["first_timestamp"]}\t{payload["last_timestamp"]}\t{payload["participant_count"]}\t{payload["attachments"]?["count"]}",
             _ => throw new ArgumentException("Format must be one of: json, jsonl, tsv, plain.", nameof(format))
         });
+        if (parsedFormat == "tsv") Output.WriteSummary(payload, cancellationToken);
         if (!payload.Value<bool>("complete") && (!local || payload.Value<string>("termination_reason") != "local_cache_exhausted"))
             throw new PartialResultException("Statistics are incomplete. See the acquisition coverage.");
     }
@@ -1193,12 +1214,19 @@ public sealed class ChatCommands
 
         if (!string.IsNullOrWhiteSpace(query))
             throw new ArgumentException("Provide either a query or a query file.");
-        var values = File.ReadLines(queries)
-            .Select(x => x.Trim())
-            .Where(x => x.Length > 0 && !x.StartsWith('#'))
-            .Distinct(StringComparer.OrdinalIgnoreCase)
-            .ToArray();
-        return values.Length > 0 ? values : throw new ArgumentException("The query file has no search terms.");
+        try
+        {
+            var values = File.ReadLines(queries)
+                .Select(x => x.Trim())
+                .Where(x => x.Length > 0 && !x.StartsWith('#'))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+            return values.Length > 0 ? values : throw new ArgumentException("The query file has no search terms.");
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+        {
+            throw new CliUsageException("The query file could not be read.", error);
+        }
     }
 
     internal static IEnumerable<TdApi.Message> FilterMessages(IEnumerable<TdApi.Message> messages, bool serviceOnly, string? kind) =>
@@ -1308,7 +1336,8 @@ public sealed class ChatCommands
             return chat.Type switch
             {
                 TdApi.ChatType.ChatTypeSupergroup group => (await TelegramOperations.AwaitReadAsync(
-                    tg.Client.GetSupergroupFullInfoAsync(group.SupergroupId), cancellationToken, retainNativeOperation)).MemberCount,
+                    tg.Client.GetSupergroupFullInfoAsync(group.SupergroupId), cancellationToken, retainNativeOperation)).MemberCount
+                    is > 0 and var count ? new JValue(count) : JValue.CreateNull(),
                 TdApi.ChatType.ChatTypeBasicGroup group => (await TelegramOperations.AwaitReadAsync(
                     tg.Client.GetBasicGroupAsync(group.BasicGroupId), cancellationToken, retainNativeOperation)).MemberCount,
                 _ => JValue.CreateNull()

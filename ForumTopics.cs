@@ -229,7 +229,7 @@ public sealed class ForumCommands
         var coverage = Wire.Coverage(Wire.Telegram, result.Complete, result.TerminationReason,
             new { chat_id = Wire.Id(chatId), query, limit, all }, nextOffset?.ToString(Formatting.None), result.PagesFetched, rows.Length);
         coverage["next_offset"] = nextOffset;
-        coverage["limit_satisfied"] = rows.Length >= limit;
+        coverage["limit_satisfied"] = result.LimitSatisfied;
         tg.CheckActive();
         cancellationToken.ThrowIfCancellationRequested();
 
@@ -250,7 +250,7 @@ public sealed class ForumCommands
             }
             Output.WriteSummary(coverage, cancellationToken);
         }
-        if (!result.Complete && (all || rows.Length < limit))
+        if (!result.Complete && (all || !result.LimitSatisfied))
             throw new PartialResultException("Forum topics are incomplete. See the acquisition coverage.");
     }
 
@@ -292,10 +292,7 @@ public sealed class ForumCommands
         return new(topics, offset, false, "max_pages_reached", maxPages, topics.Count >= limit);
     }
 
-    private static string Clean(string? value)
-    {
-        return (value ?? string.Empty).Replace('\t', ' ').Replace('\r', ' ').Replace('\n', ' ');
-    }
+
 }
 
 

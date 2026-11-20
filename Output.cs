@@ -87,6 +87,8 @@ internal static class Output
         bool includeLinks = true, string? fields = null, MediaTranscription? transcription = null,
         CancellationToken cancellationToken = default, bool local = false, JObject? coverage = null)
     {
+        tg.CheckActive();
+        cancellationToken.ThrowIfCancellationRequested();
         var ordered = messages.GroupBy(x => x.Query, StringComparer.Ordinal).SelectMany(group =>
             group.OrderBy(x => x.Item.Message.Date).ThenBy(x => x.Item.Message.ChatId).ThenBy(x => x.Item.Message.Id));
         if (format is OutputFormat.Jsonl or OutputFormat.Json)
@@ -234,6 +236,7 @@ internal static class Output
             case OutputFormat.Plain:
                 foreach (var row in rows)
                 {
+                    if (row.Query is not null) writer.Write(Clean(row.Query) + "\t");
                     writer.WriteLine(string.IsNullOrWhiteSpace(row.Text) ? row.Kind : row.Text);
                 }
                 break;

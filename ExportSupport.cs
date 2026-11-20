@@ -259,18 +259,19 @@ internal static class ChatHistory
             ["fetched_count"] = history.Messages.Count,
             ["first_date"] = dates.Length == 0 ? JValue.CreateNull() : FormatDate(dates.Min()),
             ["last_date"] = dates.Length == 0 ? JValue.CreateNull() : FormatDate(dates.Max()),
-            ["source_chats"] = new JArray(history.SourceChats.Distinct()),
+            ["source_chats"] = new JArray(history.SourceChats.Distinct().Select(Wire.Id)),
             ["pages_fetched"] = history.PagesFetched,
             ["pages_by_chat"] = JObject.FromObject(history.PagesByChat),
             ["duplicates"] = history.Duplicates,
             ["retries"] = history.Retries,
             ["gaps"] = new JArray(history.Gaps),
             ["inaccessible_messages"] = history.InaccessibleMessages,
-            ["oldest_reachable_message_by_chat"] = JObject.FromObject(history.OldestReachableByChat),
+            ["oldest_reachable_message_by_chat"] = new JObject(history.OldestReachableByChat.Select(coverage =>
+                new JProperty(Wire.Id(coverage.Key), Wire.NullableId(coverage.Value)))),
             ["newest_fetched_message"] = newestFetched is null ? JValue.CreateNull() : new JObject
             {
-                ["chat_id"] = newestFetched.Message.ChatId,
-                ["message_id"] = newestFetched.Message.Id
+                ["chat_id"] = Wire.Id(newestFetched.Message.ChatId),
+                ["message_id"] = Wire.Id(newestFetched.Message.Id)
             },
             ["termination_reason"] = history.TerminationReason,
             ["warnings"] = new JArray(history.Warnings),
@@ -287,10 +288,10 @@ internal static class ChatHistory
             var missingSample = SampleMissingPublicIds(publicIds).ToArray();
             manifest["public_id_range"] = new JObject
             {
-                ["first"] = publicIds[0],
-                ["last"] = publicIds[^1],
+                ["first"] = Wire.Id(publicIds[0]),
+                ["last"] = Wire.Id(publicIds[^1]),
                 ["missing_count"] = missingCount,
-                ["missing_public_ids"] = new JArray(missingSample),
+                ["missing_public_ids"] = new JArray(missingSample.Select(Wire.Id)),
                 ["missing_public_ids_truncated"] = missingCount > missingSample.Length
             };
             manifest["first_post"] = ToPostBoundary(firstPost);
@@ -302,9 +303,9 @@ internal static class ChatHistory
 
     private static JObject ToPostBoundary(ExportedMessage item) => new()
     {
-        ["chat_id"] = item.Message.ChatId,
-        ["message_id"] = item.Message.Id,
-        ["public_id"] = GetShortMessageId(item.Message.Id),
+        ["chat_id"] = Wire.Id(item.Message.ChatId),
+        ["message_id"] = Wire.Id(item.Message.Id),
+        ["public_id"] = Wire.Id(GetShortMessageId(item.Message.Id)),
         ["date"] = item.Message.Date == 0 ? JValue.CreateNull() : FormatDate(item.Message.Date)
     };
 

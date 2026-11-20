@@ -25,7 +25,7 @@ internal static class Wire
     {
         ["chat_id"] = Id(link.ChatId),
         ["message_id"] = Id(link.MessageId),
-        ["short_message_id"] = NullableId(link.ShortMessageId > 0 ? link.ShortMessageId : null),
+        ["short_message_id"] = NullableId(ChatHistory.TryGetPublicPostId(link.MessageId)),
         ["tg_url"] = link.TgUrl,
         ["tg_url_scope"] = link.TgUrlScope,
         ["https_url"] = link.HttpsUrl,

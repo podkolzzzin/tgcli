@@ -415,7 +415,9 @@ public sealed class BotCommands
 
         tg.CheckActive();
         deadline.ThrowIfCancellationRequested();
-        PrintRows(rows, format);
+        var coverage = Wire.Coverage(Wire.Telegram, true, "owned_bots_exhausted", new { type = "owned_bots" }, rowsFetched: rows.Count);
+        PrintRows(rows, format, coverage);
+        if (_output is null && format != "json") Output.WriteSummary(coverage, deadline);
     }
 
     private static async Task<JObject> ToBotJsonAsync(IBotTransport tg, TdApi.User user, CancellationToken deadline)
@@ -445,12 +447,12 @@ public sealed class BotCommands
         };
     }
 
-    private void PrintRows(JArray rows, string format)
+    private void PrintRows(JArray rows, string format, JObject coverage)
     {
         switch (format)
         {
             case "json":
-                Writer.WriteLine(rows.ToString(Formatting.None));
+                Output.WriteJsonCollection(Writer, rows, coverage);
                 break;
             case "jsonl":
                 foreach (var row in rows) Writer.WriteLine(row.ToString(Formatting.None));
@@ -460,7 +462,7 @@ public sealed class BotCommands
                 foreach (var row in rows.OfType<JObject>())
                 {
                     Writer.WriteLine(string.Join('\t',
-                        row.Value<long>("user_id"),
+                        row.Value<string>("user_id"),
                         Clean(row.Value<string>("username")),
                         Clean(row.Value<string>("name")),
                         row.Value<bool>("can_be_edited"),
@@ -488,7 +490,8 @@ public sealed class BotCommands
                 break;
             case "tsv":
                 Writer.WriteLine(string.Join('\t', value.Properties().Select(x => x.Name)));
-                Writer.WriteLine(string.Join('\t', value.Properties().Select(x => Clean(x.Value.Type is JTokenType.Null ? string.Empty : x.Value.ToString(Formatting.None)))));
+                Writer.WriteLine(string.Join('\t', value.Properties().Select(x => Clean(x.Value.Type == JTokenType.String ? (string?)x.Value :
+                    x.Value.Type == JTokenType.Null ? string.Empty : x.Value.ToString(Formatting.None)))));
                 break;
             case "plain":
                 Writer.WriteLine(plainValue);
@@ -498,12 +501,5 @@ public sealed class BotCommands
         }
     }
 
-    private static string Clean(string? value)
-    {
-        return (value ?? string.Empty)
-            .Replace('\t', ' ')
-            .Replace('\r', ' ')
-            .Replace('\n', ' ')
-            .Trim();
-    }
+    private static string Clean(string? value) => Output.Clean(value);
 }

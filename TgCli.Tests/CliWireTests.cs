@@ -35,6 +35,23 @@ public sealed class CliWireTests
     }
 
     [Fact]
+    public void ObservedForumMessageRetainsItsTopicIdentity()
+    {
+        var message = new TdApi.Message
+        {
+            ChatId = -1000000000027,
+            Id = 42L << 20,
+            TopicId = new TdApi.MessageTopic.MessageTopicForum { ForumTopicId = 91 }
+        };
+        var row = ExportSchema.BuildObservedMessage(message);
+        Assert.Equal(JTokenType.String, row["topic_id"]!.Type);
+        Assert.Equal("91", row.Value<string>("topic_id"));
+
+        message.TopicId = null;
+        Assert.Equal(JTokenType.Null, ExportSchema.BuildObservedMessage(message)["topic_id"]!.Type);
+    }
+
+    [Fact]
     public void DownloadReceiptDoesNotRoundAnyIdentifierOrStringifySize()
     {
         var row = BatchDownloads.ToJson(new BatchDownloadResult(0, -1000000000027, 9007199254740993, 42,

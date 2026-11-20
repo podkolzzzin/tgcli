@@ -12,7 +12,7 @@ internal sealed record ExportRequest
     private static readonly HashSet<string> FieldNames = new(StringComparer.Ordinal)
     {
         "schema", "schema_version", "chat_id", "message_id", "short_message_id", "tg_url",
-        "source_chat_id", "original_chat_id", "original_message_id", "query", "date", "edit_date", "sender_type", "sender_user_id", "sender_chat_id",
+        "source_chat_id", "original_chat_id", "original_message_id", "query", "topic_id", "date", "edit_date", "sender_type", "sender_user_id", "sender_chat_id",
         "sender_display_name", "sender_username", "kind", "text", "entities", "reply_to_chat_id",
         "reply_to_message_id", "reply_target", "forward_origin", "interaction_info", "interaction_info_available", "view_count",
         "forward_count", "reply_count", "reaction_counts", "paid_reaction_count", "has_comments",

@@ -29,6 +29,19 @@ public sealed class CliHandlerIntegrationTests : IDisposable
     }
 
     [Fact]
+    public async Task DiagnosticDeadlineStillReportsObservedLock()
+    {
+        Directory.CreateDirectory(SessionPath);
+        using var held = SessionLock.Acquire(SessionPath);
+        var (exitCode, stdout, _) = await InvokeAsync("diagnostics", "--lock-timeout", "30", "--request-timeout", "2");
+        Assert.Equal(5, exitCode);
+        var result = JObject.Parse(stdout);
+        Assert.False(result.Value<bool>("healthy"));
+        Assert.True(result["lock_status"]!.Value<bool>("locked"));
+        Assert.Equal("request_timeout", result.Value<string>("error_code"));
+    }
+
+    [Fact]
     public async Task EmptyProfileDiagnosticsPrintsLoginRequiredEvidence()
     {
         Directory.CreateDirectory(_root);

@@ -53,6 +53,10 @@ internal sealed class TelegramSession : IAsyncDisposable
                 return _terminalReason is null && _authorizationState is TdApi.AuthorizationState.AuthorizationStateReady;
         }
     }
+    internal bool IsLoginRequired
+    {
+        get { lock (_stateGate) return NeedsLogin(_authorizationState); }
+    }
     public string AuthorizationState
     {
         get { lock (_stateGate) return _authorizationState?.GetType().Name ?? "Unknown"; }

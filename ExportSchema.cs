@@ -73,6 +73,8 @@ internal static class ExportSchema
             ["original_chat_id"] = Wire.Id(item.OriginalChatId),
             ["original_message_id"] = Wire.Id(item.OriginalMessageId),
             ["query"] = query,
+            ["topic_id"] = Wire.NullableId(message.TopicId is TdApi.MessageTopic.MessageTopicForum { ForumTopicId: > 0 } topic
+                ? topic.ForumTopicId : null),
             ["date"] = Wire.Timestamp(message.Date),
             ["edit_date"] = message.EditDate == 0 ? JValue.CreateNull() : Wire.Timestamp(message.EditDate),
             ["sender_type"] = sender.Type,
@@ -202,7 +204,7 @@ internal static class ExportSchema
 
     private static (long? ChatId, long? MessageId) GetReplyTarget(TdApi.Message message)
     {
-        if (message.ReplyTo is not TdApi.MessageReplyTo.MessageReplyToMessage reply)
+        if (message.ReplyTo is not TdApi.MessageReplyTo.MessageReplyToMessage { MessageId: > 0 } reply)
         {
             return (null, null);
         }
@@ -243,6 +245,9 @@ internal static class ExportSchema
             {
                 ["chat_id"] = Wire.NullableId(chatId),
                 ["message_id"] = Wire.NullableId(messageId),
+                ["date"] = JValue.CreateNull(),
+                ["kind"] = JValue.CreateNull(),
+                ["text"] = JValue.CreateNull(),
                 ["resolved"] = false,
                 ["error"] = local ? "reply_not_cached" : "reply_unavailable"
             };
