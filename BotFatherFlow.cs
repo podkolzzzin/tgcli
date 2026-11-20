@@ -46,7 +46,7 @@ internal sealed class BotFatherFlow(BotConversation dialog, string username)
         var namePrompt = await SendAndWaitAsync("start_create", "/newbot", "BotFather's name prompt",
             message => CreatePromptName.IsMatch(Text(message)) && !Has(Text(message), "username"));
         var usernamePrompt = await SendAndWaitAsync("submit_name", name, "BotFather's username prompt",
-            message => CreatePromptUsername.IsMatch(Text(message)), namePrompt.Id);
+            message => CreatePromptUsername.IsMatch(Text(message)), namePrompt);
 
         var created = false;
         string? token = null;
@@ -58,7 +58,7 @@ internal sealed class BotFatherFlow(BotConversation dialog, string username)
             if (RecognizedToken(text) is { } received && IsExpectedTokenAccount(text))
                 token = received;
             return created && token is not null;
-        }, usernamePrompt.Id);
+        }, usernamePrompt);
         return token!;
     }
 
@@ -113,6 +113,7 @@ internal sealed class BotFatherFlow(BotConversation dialog, string username)
     private async Task<PendingReply> ActivateAsync(string step, TdApi.Message prompt, Choice choice)
     {
         var snapshot = await dialog.CaptureAsync();
+        BotConversation.RequireUnchangedPrompt(snapshot, prompt);
         if (choice.Button is not null)
         {
             await dialog.ClickAsync(step, prompt.Id, choice.Button);
@@ -124,11 +125,13 @@ internal sealed class BotFatherFlow(BotConversation dialog, string username)
     }
 
     private async Task<TdApi.Message> SendAndWaitAsync(
-        string step, string input, string expected, Func<TdApi.Message, bool> matches, long editableMessageId = 0)
+        string step, string input, string expected, Func<TdApi.Message, bool> matches, TdApi.Message? previousPrompt = null)
     {
         var snapshot = await dialog.CaptureAsync();
+        if (previousPrompt is not null)
+            BotConversation.RequireUnchangedPrompt(snapshot, previousPrompt);
         var sentId = await dialog.SendAsync(step, input);
-        return await WaitAsync(new PendingReply(snapshot, new BotConversation.ActionTarget(sentId, true, editableMessageId)),
+        return await WaitAsync(new PendingReply(snapshot, new BotConversation.ActionTarget(sentId, true, previousPrompt?.Id ?? 0)),
             expected, matches);
     }
 

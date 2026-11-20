@@ -16,7 +16,7 @@ internal sealed class BotConversation(
     IBotTransport transport, long chatId, long userId, CancellationToken deadline, TimeSpan pollInterval)
 {
     private static readonly Regex TokenPattern = new(
-        @"(?<![A-Za-z0-9_:-])[0-9]{5,}:[A-Za-z0-9_-]{20,}(?![A-Za-z0-9_-])",
+        @"(?<![A-Za-z0-9_-])[0-9]{5,}:[A-Za-z0-9_-]{20,}(?![A-Za-z0-9_-])",
         RegexOptions.CultureInvariant);
 
     internal List<JObject> Receipts { get; } = [];
@@ -43,6 +43,12 @@ internal sealed class BotConversation(
         return new Snapshot(
             messages.Where(message => message.SendingState is null).Select(message => message.Id).DefaultIfEmpty().Max(),
             messages.Where(IsFromBot).ToDictionary(message => message.Id, Revision));
+    }
+
+    internal static void RequireUnchangedPrompt(Snapshot snapshot, TdApi.Message message)
+    {
+        if (!snapshot.Revisions.TryGetValue(message.Id, out var current) || current != Revision(message))
+            throw new BotWorkflowException("failed", "The BotFather prompt changed before it could be answered.");
     }
 
     internal async Task<long> SendAsync(string step, string text)

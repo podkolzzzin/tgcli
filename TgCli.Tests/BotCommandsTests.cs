@@ -334,6 +334,33 @@ public sealed class BotCommandsTests
     }
 
     [Fact]
+    public async Task AChangedBotFatherPromptIsNeverActivated()
+    {
+        using var fixture = new Fixture();
+        var transport = fixture.Transport;
+        transport.Send = _ =>
+        {
+            transport.Messages.Add(Reply(101, "Choose a bot to delete:", Inline(Button("@example_bot"))));
+            return Task.FromResult(Outgoing(100));
+        };
+        var reads = 0;
+        transport.History = () =>
+        {
+            if (transport.Writes.Count == 1 && ++reads == 2)
+                transport.Messages[0] = Reply(101, "Choose a bot to delete:", Inline(Button("@other_bot")), editDate: 3);
+            return transport.Messages;
+        };
+
+        await Assert.ThrowsAsync<BotWorkflowException>(() => fixture.Commands.Remove("example_bot", confirm: true));
+        Assert.Equal(new[] { "send:/deletebot" }, transport.Writes);
+        Assert.Equal("failed", fixture.Result.Value<string>("status"));
+    }
+
+    [Fact]
+    public void TokenParserAcceptsColonAsDelimitingPunctuation() =>
+        Assert.Equal(TokenBody + "-", BotConversation.ExtractToken($"New token:{TokenBody}-."));
+
+    [Fact]
     public async Task TimeoutWithoutAnySendReceiptStillReportsUnknownAndDoesNotRetry()
     {
         using var fixture = new Fixture();
