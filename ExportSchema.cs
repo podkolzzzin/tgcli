@@ -23,7 +23,7 @@ internal static class ExportSchema
         var (replyChatId, replyMessageId) = GetReplyTarget(message);
         var replyPreview = await ResolveReplyPreviewAsync(tg, replyChatId, replyMessageId, local, cancellationToken);
         var links = !includeLinks ? null : local
-            ? new MessageLinkInfo(message.ChatId, message.Id, MessageLinks.GetShortMessageId(message.Id),
+            ? new MessageLinkInfo(message.ChatId, message.Id, ChatHistory.GetShortMessageId(message.Id),
                 MessageLinks.GetTgUrl(message.ChatId, message.Id), null, null)
             : await MessageLinks.BuildAsync(tg, message.ChatId, message.Id);
         cancellationToken.ThrowIfCancellationRequested();
