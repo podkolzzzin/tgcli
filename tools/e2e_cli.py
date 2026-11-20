@@ -149,8 +149,9 @@ class PackagedCliTests(unittest.TestCase):
                                   "(Get-Acl -LiteralPath $env:TGCLI_ACL_FILE).Access | ForEach-Object { "
                                   "$_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value }"],
                                  env=dict(os.environ, TGCLI_ACL_FILE=str(destination)), text=True,
-                                 capture_output=True, check=True, timeout=30)
-            self.assertIn("S-1-5-11", acl.stdout.splitlines())
+                                 capture_output=True, check=False, timeout=30)
+            self.assertEqual(acl.returncode, 0, (acl.stdout, acl.stderr))
+            self.assertIn("S-1-5-11", acl.stdout.splitlines(), acl.stderr)
 
 
 def main():
