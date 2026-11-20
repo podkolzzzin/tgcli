@@ -192,12 +192,14 @@ internal sealed class BotFatherFlow(BotConversation dialog, string username, Fun
 
     private async Task<BotConversation.Snapshot> CaptureAsync(TdApi.Message? prompt)
     {
+        var previous = dialog.CurrentSnapshot();
         var snapshot = await dialog.CaptureAsync();
         RequireExclusiveDialog(dialog.Recent);
         if (prompt is not null)
         {
-            if (dialog.Recent.Any(message => message.Id > prompt.Id && dialog.IsFromBot(message)
-                && IsConversationPrompt(Text(message))))
+            if (dialog.Recent.Any(message => message.Id != prompt.Id && dialog.IsFromBot(message)
+                && IsConversationPrompt(Text(message))
+                && (message.Id > prompt.Id || BotConversation.WasEdited(previous, message))))
                 throw ConflictingDialog();
             BotConversation.RequireUnchangedPrompt(snapshot, prompt);
         }
@@ -215,8 +217,10 @@ internal sealed class BotFatherFlow(BotConversation dialog, string username, Fun
         }, expected, history =>
         {
             RequireExclusiveDialog(history);
-            if (history.Any(message => message.Id > Math.Max(pending.Target.MessageId, pending.Snapshot.NewestId)
-                && dialog.IsFromBot(message) && IsDeletePrompt(Text(message)) && !HasNoConflictingAccount(Text(message))))
+            var newest = Math.Max(pending.Target.MessageId, pending.Snapshot.NewestId);
+            if (history.Any(message => dialog.IsFromBot(message) && IsDeletePrompt(Text(message))
+                && !HasNoConflictingAccount(Text(message))
+                && (message.Id > newest || BotConversation.WasEdited(pending.Snapshot, message))))
                 throw ConflictingDialog();
         });
 

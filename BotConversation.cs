@@ -39,11 +39,16 @@ internal sealed class BotConversation(
 
     internal async Task<Snapshot> CaptureAsync()
     {
-        var messages = await HistoryAsync(50);
-        return new Snapshot(
-            messages.Where(message => message.SendingState is null).Select(message => message.Id).DefaultIfEmpty().Max(),
-            messages.Where(IsFromBot).ToDictionary(message => message.Id, Revision));
+        await HistoryAsync(50);
+        return CurrentSnapshot();
     }
+
+    internal Snapshot CurrentSnapshot() => new(
+        Recent.Where(message => message.SendingState is null).Select(message => message.Id).DefaultIfEmpty().Max(),
+        Recent.Where(IsFromBot).ToDictionary(message => message.Id, Revision));
+
+    internal static bool WasEdited(Snapshot snapshot, TdApi.Message message) =>
+        snapshot.Revisions.TryGetValue(message.Id, out var original) && original != Revision(message);
 
     internal static void RequireUnchangedPrompt(Snapshot snapshot, TdApi.Message message)
     {

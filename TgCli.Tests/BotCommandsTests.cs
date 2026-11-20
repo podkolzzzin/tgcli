@@ -363,12 +363,15 @@ public sealed class BotCommandsTests
         Assert.Equal(TokenBody + "-", BotConversation.ExtractToken($"New token:{TokenBody}-."));
 
     [Theory]
-    [InlineData(true)]
-    [InlineData(false)]
-    public async Task SupersededDeletePromptDoesNotSendAnUnboundConfirmation(bool observesOutgoingSelection)
+    [InlineData(true, false)]
+    [InlineData(false, false)]
+    [InlineData(false, true)]
+    public async Task SupersededDeletePromptDoesNotSendAnUnboundConfirmation(bool observesOutgoingSelection, bool editedInPlace)
     {
         using var fixture = new Fixture();
         var transport = fixture.Transport;
+        if (editedInPlace)
+            transport.Messages.Add(Reply(99, "An old BotFather message."));
         transport.Send = text =>
         {
             if (text == "/deletebot")
@@ -389,7 +392,11 @@ public sealed class BotCommandsTests
             {
                 if (observesOutgoingSelection)
                     transport.Messages.Add(Reply(103, "@other_bot", outgoing: true, userId: 1));
-                transport.Messages.Add(Reply(104, "Are you sure you want to delete @other_bot? Type Yes, I am totally sure."));
+                const string otherPrompt = "Are you sure you want to delete @other_bot? Type Yes, I am totally sure.";
+                if (editedInPlace)
+                    transport.Messages[0] = Reply(99, otherPrompt, editDate: 3);
+                else
+                    transport.Messages.Add(Reply(104, otherPrompt));
             }
             return transport.Messages;
         };
