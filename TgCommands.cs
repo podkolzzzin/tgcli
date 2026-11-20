@@ -369,39 +369,40 @@ public sealed class ChannelCommands
         ForumTopicHistory.ValidateRequestTimeout(requestTimeout);
         cancellationToken.ThrowIfCancellationRequested();
 
-        await using var tg = await TelegramSession.CreateReadyAsync(session, local: local);
-        var history = await TelegramOperations.WithReadDeadlineAsync(requestTimeout, cancellationToken, false, async token =>
-        {
-            await ValidateChannelAsync(tg, chatId, token);
-            return await ChatHistory.FetchAsync(tg, chatId, all: true, local, maxPages, followMigrations: false, token,
-                requestTimeout: requestTimeout);
-        });
-        RequireKnownHistoryHead(history.TerminationReason);
+        await using var tg = await TelegramSession.CreateReadyAsync(session, local: local, cancellationToken: cancellationToken);
+        await ValidateChannelAsync(tg, chatId, cancellationToken);
+        var history = await ChatHistory.FetchAsync(tg, chatId, all: true, local, maxPages, followMigrations: false,
+            cancellationToken, requestTimeout: requestTimeout, retainNativeOperation: true);
         var rows = history.Messages.Select(x => x.Message)
             .Where(message => message.IsChannelPost && ChatHistory.TryGetPublicPostId(message.Id) is long postId
                 && (fromPostId == 0 || postId >= fromPostId)
                 && (toPostId == 0 || postId <= toPostId)
                 && (since is null || DateTimeOffset.FromUnixTimeSeconds(message.Date) >= since)
                 && (until is null || DateTimeOffset.FromUnixTimeSeconds(message.Date) <= until))
-            .OrderBy(message => message.Id)
+            .OrderBy(message => message.Date).ThenBy(message => message.ChatId).ThenBy(message => message.Id)
             .Select(ToMetricRow)
             .ToArray();
-        var coverage = HistoryCoverage(history);
+        var coverage = HistoryCoverage(history, new { chat_id = Wire.Id(chatId),
+            from_post_id = fromPostId == 0 ? null : Wire.Id(fromPostId), to_post_id = toPostId == 0 ? null : Wire.Id(toPostId),
+            since_date = since is null ? null : Wire.Timestamp(since.Value), until_date = until is null ? null : Wire.Timestamp(until.Value) },
+            rows.Length);
+        tg.CheckActive();
+        cancellationToken.ThrowIfCancellationRequested();
 
         switch (parsedFormat)
         {
             case "jsonl":
                 foreach (var row in rows) Console.WriteLine(row.ToString(Formatting.None));
-                Console.Error.WriteLine(coverage.ToString(Formatting.None));
+                Output.WriteSummary(coverage, cancellationToken);
                 break;
             case "json":
                 Console.WriteLine(new JObject
                 {
-                    ["chat_id"] = chatId,
+                    ["chat_id"] = Wire.Id(chatId),
                     ["post_count"] = rows.Length,
                     ["coverage"] = coverage,
                     ["aggregates"] = BuildMetricAggregates(rows),
-                    ["posts"] = new JArray(rows)
+                    ["items"] = new JArray(rows)
                 }.ToString(Formatting.None));
                 break;
             case "csv":
@@ -409,8 +410,8 @@ public sealed class ChannelCommands
                 foreach (var row in rows)
                 {
                     Console.WriteLine(string.Join(',',
-                        row.Value<long>("post_id"),
-                        row.Value<long>("message_id"),
+                        row.Value<string>("post_id"),
+                        row.Value<string>("message_id"),
                         Csv(row.Value<string>("date")),
                         Csv(row.Value<string>("kind")),
                         row.Value<int>("text_length"),
@@ -422,9 +423,11 @@ public sealed class ChannelCommands
                         row.Value<long?>("paid_reaction_count"),
                         row.Value<double?>("engagement_rate")?.ToString("0.######", CultureInfo.InvariantCulture)));
                 }
-                Console.Error.WriteLine(coverage.ToString(Formatting.None));
+                Output.WriteSummary(coverage, cancellationToken);
                 break;
         }
+        if (!history.Complete && (!local || history.TerminationReason != "local_cache_exhausted"))
+            throw new PartialResultException("Channel metrics are incomplete. See the acquisition coverage.");
     }
 
     /// <summary>
@@ -452,75 +455,79 @@ public sealed class ChannelCommands
         cancellationToken.ThrowIfCancellationRequested();
 
         await using var tg = await TelegramSession.CreateReadyAsync(session, cancellationToken: cancellationToken);
-        var rows = await TelegramOperations.WithReadDeadlineAsync(requestTimeout, cancellationToken, false, async token =>
+        await ValidateChannelAsync(tg, chatId, cancellationToken);
+        var output = new List<JObject>();
+        var threads = new JArray();
+        var scope = new { channel_chat_id = Wire.Id(chatId), post_id = postId == 0 ? null : Wire.Id(postId), all, summary };
+        JObject? postScan = null;
+        long[] postIds = [postId];
+        if (all)
         {
-            await ValidateChannelAsync(tg, chatId, token);
-            var output = new List<JObject>();
-            long[] postIds = [postId];
-            if (all)
-            {
-                var history = await ChatHistory.FetchAsync(tg, chatId, all: true, local: false, maxPages,
-                    followMigrations: false, token, requestTimeout: requestTimeout);
-                RequireKnownHistoryHead(history.TerminationReason);
-                postIds = history.Messages.Where(x => x.Message.IsChannelPost)
-                    .Select(x => ChatHistory.TryGetPublicPostId(x.Message.Id)).OfType<long>().Distinct().Order().ToArray();
-                var coverage = HistoryCoverage(history);
-                coverage["record_type"] = "post_scan_coverage";
-                coverage["channel_chat_id"] = chatId;
-                output.Add(coverage);
-            }
+            var history = await ChatHistory.FetchAsync(tg, chatId, all: true, local: false, maxPages,
+                followMigrations: false, cancellationToken, requestTimeout: requestTimeout, retainNativeOperation: true);
+            postIds = history.Messages.Where(x => x.Message.IsChannelPost)
+                .Select(x => ChatHistory.TryGetPublicPostId(x.Message.Id)).OfType<long>().Distinct().Order().ToArray();
+            postScan = HistoryCoverage(history, scope, postIds.Length);
+        }
 
-            foreach (var publicPostId in postIds)
-            {
-                token.ThrowIfCancellationRequested();
-                var postRows = await FetchCommentRowsAsync(chatId, publicPostId, maxPages,
-                    async request =>
+        foreach (var publicPostId in postIds)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var postRows = await FetchCommentRowsAsync(chatId, publicPostId, maxPages,
+                async request =>
+                {
+                    try { return await tg.Client.ExecuteAsync(request); }
+                    catch (TdException ex) when (TelegramOperations.IsMessageUnavailable(ex)
+                        || ex.Error.Code == 400 && ex.Error.Message is "Message has no comments" or "Message has no thread")
                     {
-                        try
-                        {
-                            return await tg.Client.ExecuteAsync(request).WaitAsync(token);
-                        }
-                        catch (TdException ex) when (TelegramOperations.IsMessageUnavailable(ex)
-                            || ex.Error.Code == 400 && ex.Error.Message is "Message has no comments" or "Message has no thread")
-                        {
-                            return null;
-                        }
-                    },
-                    request => tg.Client.ExecuteAsync(request).WaitAsync(token), token);
-                if (summary) output.Add(BuildCommentSummary(postRows));
-                else output.AddRange(postRows);
-            }
-            return output;
-        });
+                        return null;
+                    }
+                }, request => tg.Client.ExecuteAsync(request), cancellationToken,
+                summary ? null : message => ExportSchema.BuildMessageAsync(tg, Output.ToExportedMessage(message),
+                    includeLinks: true, cancellationToken: cancellationToken));
+            threads.Add(postRows[^1]);
+            if (summary) output.Add(BuildCommentSummary(postRows));
+            else output.AddRange(postRows.Take(postRows.Count - 1));
+        }
 
-        if (parsedFormat == "json")
-            Console.WriteLine(new JArray(rows).ToString(Formatting.None));
+        var rows = summary ? output : output.OrderBy(row => row.Value<string>("date"), StringComparer.Ordinal)
+            .ThenBy(row => row.Value<long>("chat_id")).ThenBy(row => row.Value<long>("message_id")).ToList();
+        var complete = postScan?.Value<bool>("complete") != false && threads.All(row => row.Value<bool>("complete"));
+        var metadata = Wire.Coverage(Wire.Telegram, complete, complete ? "history_exhausted" : "comment_coverage_incomplete",
+            scope, rowsFetched: rows.Count);
+        metadata["post_scan"] = postScan;
+        metadata["threads"] = threads;
+        tg.CheckActive();
+        cancellationToken.ThrowIfCancellationRequested();
+        if (parsedFormat == "json") Output.WriteJsonCollection(Console.Out, new JArray(rows), metadata);
         else
-            foreach (var row in rows) Console.WriteLine(row.ToString(Formatting.None));
-    }
-
-    private static void RequireKnownHistoryHead(string reason)
-    {
-        if (reason == "newest_message_unavailable")
-            throw new InvalidOperationException("TDLib did not return its known latest channel message (newest_message_unavailable).");
+        {
+            foreach (var row in rows)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                Console.WriteLine(row.ToString(Formatting.None));
+            }
+            Output.WriteSummary(metadata, cancellationToken);
+        }
+        if (!complete) throw new PartialResultException("Channel comments are incomplete. See the acquisition coverage.");
     }
 
     private static async Task ValidateChannelAsync(TelegramSession tg, long chatId, CancellationToken cancellationToken)
     {
-        var chat = await tg.Client.GetChatAsync(chatId).WaitAsync(cancellationToken);
+        var chat = await TelegramOperations.AwaitReadAsync(tg.Client.GetChatAsync(chatId), cancellationToken, retainNativeOperation: true);
         if (chat.Type is not TdApi.ChatType.ChatTypeSupergroup { IsChannel: true })
             throw new ArgumentException("The requested chat must be a channel.", nameof(chatId));
     }
 
-    private static JObject HistoryCoverage(HistoryFetchResult history) => new()
+    private static JObject HistoryCoverage(HistoryFetchResult history, object scope, int rows)
     {
-        ["source"] = history.Local ? "cache" : "telegram",
-        ["freshness"] = history.Local ? "cache" : "tdlib_update_state",
-        ["complete"] = history.Complete,
-        ["termination_reason"] = history.TerminationReason,
-        ["pages_fetched"] = history.PagesFetched,
-        ["next_message_id"] = history.NextMessageId
-    };
+        var continuation = history.NextMessageId is { } id ? Wire.Id(id) : null;
+        var result = Wire.Coverage(history.Local ? Wire.LocalCache : Wire.Telegram, history.Complete, history.TerminationReason,
+            scope, continuation, history.PagesFetched, rows);
+        result["freshness"] = history.Local ? "cache" : "tdlib_update_state";
+        result["next_message_id"] = continuation;
+        return result;
+    }
 
     internal static JObject ToMetricRow(TdApi.Message message)
     {
@@ -532,10 +539,10 @@ public sealed class ChannelCommands
         var text = MessageFiles.GetMessageText(message.Content);
         return new JObject
         {
-            ["post_id"] = ChatHistory.TryGetPublicPostId(message.Id),
-            ["message_id"] = message.Id,
-            ["chat_id"] = message.ChatId,
-            ["date"] = DateTimeOffset.FromUnixTimeSeconds(message.Date).ToString("O", CultureInfo.InvariantCulture),
+            ["post_id"] = Wire.NullableId(ChatHistory.TryGetPublicPostId(message.Id)),
+            ["message_id"] = Wire.Id(message.Id),
+            ["chat_id"] = Wire.Id(message.ChatId),
+            ["date"] = Wire.Timestamp(message.Date),
             ["kind"] = MessageFiles.GetKind(message.Content),
             ["text_length"] = text.Length,
             ["link_domains"] = new JArray(ExtractDomains(message.Content)),
@@ -575,7 +582,8 @@ public sealed class ChannelCommands
 
     internal static async Task<List<JObject>> FetchCommentRowsAsync(long channelChatId, long publicPostId, int maxPages,
         Func<TdApi.GetMessageThread, Task<TdApi.MessageThreadInfo?>> fetchThread,
-        Func<TdApi.GetMessageThreadHistory, Task<TdApi.Messages>> fetchHistory, CancellationToken cancellationToken)
+        Func<TdApi.GetMessageThreadHistory, Task<TdApi.Messages>> fetchHistory, CancellationToken cancellationToken,
+        Func<TdApi.Message, Task<JObject>>? render = null)
     {
         var channelMessageId = ChatHistory.ToChannelMessageId(publicPostId);
         ReadBounds.ValidatePage(0, 0, 100, maxPages);
@@ -585,17 +593,17 @@ public sealed class ChannelCommands
         var coverage = new JObject
         {
             ["record_type"] = "coverage",
-            ["channel_chat_id"] = channelChatId,
-            ["channel_post_id"] = publicPostId,
-            ["channel_message_id"] = channelMessageId,
+            ["channel_chat_id"] = Wire.Id(channelChatId),
+            ["channel_post_id"] = Wire.Id(publicPostId),
+            ["channel_message_id"] = Wire.Id(channelMessageId),
             ["complete"] = false,
             ["pages_fetched"] = 0,
             ["termination_reason"] = thread is null ? "thread_unavailable" : "max_pages_reached",
             ["is_inaccessible"] = thread is null
         };
         if (thread is null) return [coverage];
-        coverage["discussion_chat_id"] = thread.ChatId;
-        coverage["discussion_message_id"] = thread.MessageThreadId;
+        coverage["discussion_chat_id"] = Wire.Id(thread.ChatId);
+        coverage["discussion_message_id"] = Wire.Id(thread.MessageThreadId);
 
         var starters = (thread.Messages ?? []).DistinctBy(x => (x.ChatId, x.Id)).ToDictionary(x => (x.ChatId, x.Id));
         var messages = new Dictionary<(long, long), TdApi.Message>(starters);
@@ -642,26 +650,24 @@ public sealed class ChannelCommands
             coverage["termination_reason"] = "max_pages_reached";
         }
 
-        var output = messages.Values.OrderBy(x => x.Date).ThenBy(x => x.ChatId).ThenBy(x => x.Id).Select(message => new JObject
+        var output = new List<JObject>();
+        foreach (var message in messages.Values.OrderBy(x => x.Date).ThenBy(x => x.ChatId).ThenBy(x => x.Id))
         {
-            ["record_type"] = "message",
-            ["channel_chat_id"] = channelChatId,
-            ["channel_post_id"] = publicPostId,
-            ["channel_message_id"] = channelMessageId,
-            ["discussion_chat_id"] = thread.ChatId,
-            ["discussion_message_id"] = thread.MessageThreadId,
-            ["comment_chat_id"] = message.ChatId,
-            ["message_id"] = message.Id,
-            ["date"] = DateTimeOffset.FromUnixTimeSeconds(message.Date).ToString("O", CultureInfo.InvariantCulture),
-            ["sender"] = FormatSender(message.SenderId),
-            ["text"] = MessageFiles.GetMessageText(message.Content),
-            ["reply_to_message_id"] = (message.ReplyTo as TdApi.MessageReplyTo.MessageReplyToMessage)?.MessageId,
-            ["reaction_counts"] = message.InteractionInfo is null ? JValue.CreateNull()
-                : ExportSchema.BuildReactionCounts(message.InteractionInfo.Reactions?.Reactions ?? []),
-            ["is_thread_root"] = (message.ChatId == thread.ChatId && message.Id == thread.MessageThreadId)
-                || starters.ContainsKey((message.ChatId, message.Id)),
-            ["is_inaccessible"] = false
-        }).ToList();
+            cancellationToken.ThrowIfCancellationRequested();
+            var row = render is null ? ExportSchema.BuildObservedMessage(message) : await render(message);
+            row["record_type"] = "message";
+            row["channel_chat_id"] = Wire.Id(channelChatId);
+            row["channel_post_id"] = Wire.Id(publicPostId);
+            row["channel_message_id"] = Wire.Id(channelMessageId);
+            row["discussion_chat_id"] = Wire.Id(thread.ChatId);
+            row["discussion_message_id"] = Wire.Id(thread.MessageThreadId);
+            row["comment_chat_id"] = Wire.Id(message.ChatId);
+            row["sender"] = FormatSender(message.SenderId);
+            row["is_thread_root"] = (message.ChatId == thread.ChatId && message.Id == thread.MessageThreadId)
+                || starters.ContainsKey((message.ChatId, message.Id));
+            row["is_inaccessible"] = false;
+            output.Add(row);
+        }
         var observedReplies = output.Count(row => row.Value<bool>("is_thread_root") == false);
         coverage["observed_reply_count"] = observedReplies;
         if (coverage.Value<bool>("complete") && thread.ReplyInfo?.ReplyCount > observedReplies)
@@ -670,7 +676,7 @@ public sealed class ChannelCommands
             coverage["termination_reason"] = "replies_missing_from_history";
         }
         if (cursor != 0 && !coverage.Value<bool>("complete"))
-            coverage["next_message_id"] = cursor;
+            coverage["next_message_id"] = Wire.Id(cursor);
         output.Add(coverage);
         return output;
     }

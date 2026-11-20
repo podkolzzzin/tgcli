@@ -354,12 +354,12 @@ internal static class BatchDownloads
         return new JObject
         {
             ["index"] = result.Index,
-            ["chat_id"] = result.ChatId,
-            ["message_id"] = result.MessageId,
+            ["chat_id"] = Wire.Id(result.ChatId),
+            ["message_id"] = Wire.Id(result.MessageId),
             ["ok"] = result.Ok,
             ["status"] = result.Status,
             ["size_bytes"] = result.SizeBytes,
-            ["file_id"] = result.FileId is null ? JValue.CreateNull() : result.FileId.Value,
+            ["file_id"] = Wire.NullableId(result.FileId),
             ["path"] = result.Path is null ? JValue.CreateNull() : result.Path,
             ["error"] = result.Error is null ? JValue.CreateNull() : result.Error
         };

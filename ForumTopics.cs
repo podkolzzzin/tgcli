@@ -211,79 +211,47 @@ public sealed class ForumCommands
         string? session = null,
         CancellationToken cancellationToken = default)
     {
-        var parsedFormat = format.Trim().ToLowerInvariant();
-        if (parsedFormat is not ("json" or "jsonl" or "tsv" or "plain"))
-            throw new ArgumentException("Format must be one of: json, jsonl, tsv, plain.", nameof(format));
+        var mode = Output.ParseFormat(format);
+        if (mode == OutputFormat.Md) throw new ArgumentException("Format must be one of: json, jsonl, tsv, plain.", nameof(format));
         ReadBounds.ValidatePage(0, 0, limit, maxPages);
         ForumTopicHistory.ValidateRequestTimeout(requestTimeout);
+        await using var tg = await TelegramSession.CreateReadyAsync(session, lockTimeout, noWait,
+            cancellationToken: cancellationToken);
+        var result = await FetchTopicsAsync(chatId, query, limit, all, maxPages, request => tg.Client.ExecuteAsync(request),
+            cancellationToken);
+        var rows = result.Topics.Select(Wire.Topic).ToArray();
+        var nextOffset = result.Next is { } next ? new JObject
+        {
+            ["date"] = next.Date,
+            ["message_id"] = Wire.NullableId(next.Message == 0 ? null : next.Message),
+            ["topic_id"] = Wire.NullableId(next.Topic == 0 ? null : next.Topic)
+        } : null;
+        var coverage = Wire.Coverage(Wire.Telegram, result.Complete, result.TerminationReason,
+            new { chat_id = Wire.Id(chatId), query, limit, all }, nextOffset?.ToString(Formatting.None), result.PagesFetched, rows.Length);
+        coverage["next_offset"] = nextOffset;
+        coverage["limit_satisfied"] = rows.Length >= limit;
+        tg.CheckActive();
         cancellationToken.ThrowIfCancellationRequested();
-        await using var tg = await TelegramSession.CreateReadyAsync(session, lockTimeout, noWait);
-        var result = await TelegramOperations.WithReadDeadlineAsync(requestTimeout, cancellationToken, false, token =>
-            FetchTopicsAsync(chatId, query, limit, all, maxPages, request => tg.Client.ExecuteAsync(request).WaitAsync(token), token));
 
-        var rows = result.Topics.Select(topic => new JObject
+        if (mode == OutputFormat.Json) Output.WriteJsonCollection(Console.Out, new JArray(rows), coverage);
+        else
         {
-            ["chat_id"] = topic.Info.ChatId,
-            ["topic_id"] = topic.Info.ForumTopicId,
-            ["name"] = topic.Info.Name,
-            ["is_general"] = topic.Info.IsGeneral,
-            ["is_closed"] = topic.Info.IsClosed,
-            ["is_hidden"] = topic.Info.IsHidden,
-            ["is_pinned"] = topic.IsPinned,
-            ["unread_count"] = topic.UnreadCount,
-            ["last_message_id"] = topic.LastMessage?.Id ?? 0
-        }).ToArray();
-
-        if (parsedFormat != "json" && !result.Complete)
-            Console.Error.WriteLine($"Forum topic coverage: {result.TerminationReason} after {result.PagesFetched} pages.");
-
-        switch (parsedFormat)
-        {
-            case "json":
-                Console.WriteLine(new JObject
+            string[] fields = ["chat_id", "topic_id", "name", "is_closed", "is_hidden", "is_pinned", "unread_count", "last_message_id"];
+            if (mode == OutputFormat.Tsv) Console.WriteLine(string.Join('\t', fields));
+            foreach (var row in rows)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                Console.WriteLine(mode switch
                 {
-                    ["items"] = new JArray(rows),
-                    ["complete"] = result.Complete,
-                    ["termination_reason"] = result.TerminationReason,
-                    ["pages_fetched"] = result.PagesFetched,
-                    ["next_offset"] = result.Next is { } next ? new JObject
-                    {
-                        ["date"] = next.Date,
-                        ["message_id"] = next.Message,
-                        ["topic_id"] = next.Topic
-                    } : null
-                }.ToString(Formatting.None));
-                break;
-            case "jsonl":
-                foreach (var row in rows)
-                {
-                    Console.WriteLine(row.ToString(Formatting.None));
-                }
-                break;
-            case "tsv":
-                Console.WriteLine("chat_id\ttopic_id\tname\tis_closed\tis_hidden\tis_pinned\tunread_count\tlast_message_id");
-                foreach (var row in rows)
-                {
-                    Console.WriteLine(string.Join('\t',
-                        row.Value<long>("chat_id"),
-                        row.Value<int>("topic_id"),
-                        Clean(row.Value<string>("name")),
-                        row.Value<bool>("is_closed"),
-                        row.Value<bool>("is_hidden"),
-                        row.Value<bool>("is_pinned"),
-                        row.Value<int>("unread_count"),
-                        row.Value<long>("last_message_id")));
-                }
-                break;
-            case "plain":
-                foreach (var row in rows)
-                {
-                    Console.WriteLine($"{row.Value<int>("topic_id")}\t{Clean(row.Value<string>("name"))}");
-                }
-                break;
-            default:
-                throw new ArgumentException("Format must be one of: json, jsonl, tsv, plain.", nameof(format));
+                    OutputFormat.Jsonl => row.ToString(Formatting.None),
+                    OutputFormat.Tsv => string.Join('\t', fields.Select(name => Output.Clean((string?)row[name]))),
+                    _ => $"{row.Value<string>("topic_id")}\t{Output.Clean(row.Value<string>("name"))}"
+                });
+            }
+            Output.WriteSummary(coverage, cancellationToken);
         }
+        if (!result.Complete && (all || rows.Length < limit))
+            throw new PartialResultException("Forum topics are incomplete. See the acquisition coverage.");
     }
 
     internal static async Task<ForumTopicsResult> FetchTopicsAsync(

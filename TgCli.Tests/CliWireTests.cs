@@ -34,6 +34,29 @@ public sealed class CliWireTests
         Assert.Equal(JTokenType.Integer, row["size"]!.Type);
     }
 
+    [Fact]
+    public void DownloadReceiptDoesNotRoundAnyIdentifierOrStringifySize()
+    {
+        var row = BatchDownloads.ToJson(new BatchDownloadResult(0, -1000000000027, 9007199254740993, 42,
+            "attachment.bin", null, SizeBytes: 1234));
+        Assert.Equal(JTokenType.String, row["chat_id"]!.Type);
+        Assert.Equal(JTokenType.String, row["message_id"]!.Type);
+        Assert.Equal(JTokenType.String, row["file_id"]!.Type);
+        Assert.Equal(JTokenType.Integer, row["size_bytes"]!.Type);
+    }
+
+    [Fact]
+    public void MetricIdentifiersAndTimestampUseTheirWireTypes()
+    {
+        var row = ChannelCommands.ToMetricRow(new TdApi.Message { ChatId = -1000000000027, Id = 42L << 20, Date = 2 });
+        Assert.Equal(JTokenType.String, row["chat_id"]!.Type);
+        Assert.Equal(JTokenType.String, row["message_id"]!.Type);
+        Assert.Equal(JTokenType.String, row["post_id"]!.Type);
+        Assert.Equal("42", row.Value<string>("post_id"));
+        Assert.Equal("1970-01-01T00:00:02.0000000Z", row.Value<string>("date"));
+        Assert.Equal(JTokenType.Null, row["view_count"]!.Type);
+    }
+
     [Theory]
     [InlineData("json")]
     [InlineData("plain")]
